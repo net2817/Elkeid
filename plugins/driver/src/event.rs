@@ -71,28 +71,35 @@ fn event_fields(data_type: u32) -> &'static [&'static str] {
     }
 }
 
+/// 判断该 data_type 是否带公共头（ENTRY_COMMON）。
+/// 使用 ENTRY_XID（无公共头）的事件：call_usermodehelper_exec(607)、psad(612)、anti-rootkit(700-703)。
+fn has_common_header(data_type: u32) -> bool {
+    !matches!(data_type, 607 | 612 | 700 | 701 | 702 | 703)
+}
+
 /// 将一条 \0 分隔的文本记录解析为 `plugins::Record`。
 ///
-/// 假设输出格式为：`data_type\0uid\0exe_path\0...私有字段...\0`
-/// （公共头字段顺序见 COMMON_FIELDS，私有字段见 event_fields）。
-/// 若实测发现首字段是 timestamp，则把 `split[0]` 当时间戳、`split[1]` 当 data_type。
+/// 输出格式（已实测确认）：`data_type\0[公共头 12 字段]\0[私有字段...]\0`
+/// 首字段为 data_type；公共头字段顺序见 COMMON_FIELDS，私有字段见 event_fields。
+/// 注意：607/612/700-703 无公共头。
 pub fn parse_record(rec: &[u8]) -> Option<Record> {
     let fields: Vec<&[u8]> = rec.split(|c| *c == 0).filter(|f| !f.is_empty()).collect();
     if fields.is_empty() {
         return None;
     }
 
-    // TODO(linux-verify): 确认首字段是否为 data_type（若带 timestamp 则偏移 +1）
     let data_type = std::str::from_utf8(fields[0]).ok()?.parse::<u32>().ok()?;
     let rest = &fields[1..];
 
     let mut map: HashMap<String, String> = HashMap::new();
     let mut idx = 0;
-    for name in COMMON_FIELDS {
-        if idx < rest.len() {
-            map.insert((*name).to_string(), String::from_utf8_lossy(rest[idx]).into_owned());
+    if has_common_header(data_type) {
+        for name in COMMON_FIELDS {
+            if idx < rest.len() {
+                map.insert((*name).to_string(), String::from_utf8_lossy(rest[idx]).into_owned());
+            }
+            idx += 1;
         }
-        idx += 1;
     }
     for name in event_fields(data_type) {
         if idx < rest.len() {
