@@ -6,7 +6,7 @@
 
 ## 现状与已合入的代码
 
-上游 `main` 基线为 `c906c512d20c0d56f2b779b8558ed69abae718c8`。目标仓库本轮校正起点的 `main` 为 `e5873fe72fede48355cfb68e58b3627156f180b5`，比该基线前进 3 个提交；全分支审计首次提交为 [`7667e3c`](https://github.com/net2817/Elkeid/commit/7667e3c1c2d5ef0e4eb09a4eb4414c2c348e6649)。
+上游 `main` 基线为 `c906c512d20c0d56f2b779b8558ed69abae718c8`。本轮审计开始时目标 `main` 为 `e5873fe72fede48355cfb68e58b3627156f180b5`，比基线前进 3 个提交（含两项分支代码导入和一项旧整合说明）。审计文档提交后，目标 `main` 当前为 [`ade7778`](https://github.com/net2817/Elkeid/commit/ade7778a2803c7079e6d5f0c1377ce62a928ae51)，比基线前进 5 个提交；新增的两个提交只改审计文档。
 
 目标仓库已经导入两项上游分支代码：
 
@@ -15,6 +15,8 @@
 | [`43de387`](https://github.com/net2817/Elkeid/commit/43de387dc7a8eb504f6cc2e93f941bcb99dbc133) | [`v3.0`](https://github.com/bytedance/Elkeid/tree/v3.0) | `driver/` 子树文件内容与分支相同；`driver/VERSION=3.0.0.7` |
 | [`18c40c0`](https://github.com/net2817/Elkeid/commit/18c40c01fcfe23a0032e27ced543a7a41fb7eeba) | [`2.2.3/ac`](https://github.com/bytedance/Elkeid/tree/2.2.3/ac) | `server/agent_center/` 子树文件内容与分支相同 |
 | [`e5873fe`](https://github.com/net2817/Elkeid/commit/e5873fe72fede48355cfb68e58b3627156f180b5) | 本仓库 | 首版整合文档 |
+| [`7667e3c`](https://github.com/net2817/Elkeid/commit/7667e3c1c2d5ef0e4eb09a4eb4414c2c348e6649) | 本仓库 | 全分支账本与整合状态校正 |
+| [`ade7778`](https://github.com/net2817/Elkeid/commit/ade7778a2803c7079e6d5f0c1377ce62a928ae51) | 本仓库 | 校正审计快照与提交计数 |
 
 ### 驱动分支实际能力与边界
 
