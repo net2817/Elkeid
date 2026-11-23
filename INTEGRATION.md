@@ -2,7 +2,7 @@
 
 审计日期：2026-11-23  
 上游基线：[bytedance/Elkeid `main`](https://github.com/bytedance/Elkeid/tree/main)，`c906c512`  
-本仓库：[net2817/Elkeid `main`](https://github.com/net2817/Elkeid/tree/main)，当前头 `e5873fe`
+本仓库：[net2817/Elkeid `main`](https://github.com/net2817/Elkeid/tree/main)，本轮校正起点为 `e5873fe`；首次审计文档提交为 `7667e3c`
 
 目标 `main` 相对上游基线有 3 个额外提交；两项分支代码已进入目标仓库，另有整合说明提交：
 
@@ -11,6 +11,7 @@
 | [`43de387`](https://github.com/net2817/Elkeid/commit/43de387dc7a8eb504f6cc2e93f941bcb99dbc133) | 上游 `v3.0` | 整个 `driver/` 子树；目录内容与上游该分支一致，版本文件为 `3.0.0.7` |
 | [`18c40c0`](https://github.com/net2817/Elkeid/commit/18c40c01fcfe23a0032e27ced543a7a41fb7eeba) | 上游 `2.2.3/ac` | 整个 `server/agent_center/` 子树；目录内容与上游该分支一致 |
 | [`e5873fe`](https://github.com/net2817/Elkeid/commit/e5873fe72fede48355cfb68e58b3627156f180b5) | 本仓库文档 | 首版整合说明 |
+| [`7667e3c`](https://github.com/net2817/Elkeid/commit/7667e3c1c2d5ef0e4eb09a4eb4414c2c348e6649) | 本仓库文档 | 全分支账本与整合状态校正 |
 
 ## 从其它分支导入
 
