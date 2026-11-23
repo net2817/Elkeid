@@ -64,6 +64,9 @@ func initDefault() {
 	PProfPort = UserConfig.GetInt("server.pprof.port")
 
 	RawDataPort = UserConfig.GetInt("server.rawdata.port")
+
+	UserName = UserConfig.GetString("manage.username")
+	Password = UserConfig.GetString("manage.password")
 }
 
 func initLog() {
@@ -71,9 +74,9 @@ func initLog() {
 	logPath := UserConfig.GetString("server.log.applog.path")
 	logger := ylog.NewYLog(
 		ylog.WithLogFile(logPath),
-		ylog.WithMaxAge(3),
-		ylog.WithMaxSize(10),
-		ylog.WithMaxBackups(3),
+		ylog.WithMaxAge(7),
+		ylog.WithMaxSize(100),
+		ylog.WithMaxBackups(24),
 		ylog.WithLevel(logLevel),
 	)
 	ylog.InitLogger(logger)

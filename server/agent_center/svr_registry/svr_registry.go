@@ -3,14 +3,14 @@ package svr_registry
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
-	"time"
-
 	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	"github.com/bytedance/Elkeid/server/agent_center/grpctrans/grpc_handler"
 	"github.com/bytedance/Elkeid/server/agent_center/httptrans/midware"
 	"github.com/levigross/grequests"
+	"math/rand"
+	"net"
+	"time"
 )
 
 type ServerRegistry struct {
@@ -49,7 +49,7 @@ func NewRegistry(svrName, ip string, addrList []string, port int) *ServerRegistr
 	ylog.Infof("NewRegistry", ">>>>new registry: %s", *svr)
 	option := midware.AuthRequestOption()
 	option.JSON = svr
-	resp, err := grequests.Post(fmt.Sprintf("http://%s/registry/register", svr.randomAddr()), grequests.FromRequestOptions(option))
+	resp, err := grequests.Post(fmt.Sprintf("http://%s/registry/register", svr.randomAddr()), option)
 	if err != nil {
 		fmt.Printf("[NewRegistry] >>>>new registry %s error, resp: %s\n", svr.print(), resp.String())
 		ylog.Errorf("NewRegistry", "NewRegistry failed: %v", err)
@@ -76,7 +76,7 @@ func (s *ServerRegistry) renewRegistry() {
 			option := midware.AuthRequestOption()
 			option.JSON = s
 			ylog.Infof("RenewRegistry", ">>>>register %s to FindYou %s", s.print(), url)
-			resp, err := grequests.Post(url, grequests.FromRequestOptions(option))
+			resp, err := grequests.Post(url, option)
 			if err != nil {
 				ylog.Errorf("RenewRegistry", "####renew registry failed: %v", err)
 				continue
@@ -98,7 +98,7 @@ func (s *ServerRegistry) Stop() {
 
 	option := midware.AuthRequestOption()
 	option.JSON = s
-	if resp, err = grequests.Post(fmt.Sprintf("http://%s/registry/evict", s.randomAddr()), grequests.FromRequestOptions(option)); err != nil {
+	if resp, err = grequests.Post(fmt.Sprintf("http://%s/registry/evict", s.randomAddr()), option); err != nil {
 		ylog.Errorf("ServerRegistryStop", "####evict server failed: %v", err)
 		return
 	}
@@ -111,7 +111,28 @@ func (s *ServerRegistry) SetWeight(w int) {
 }
 
 func (s *ServerRegistry) randomAddr() string {
-	return s.AddrList[rand.Intn(len(s.AddrList))]
+	tmpList := make([]string, len(s.AddrList))
+
+	//return random reachable one
+	copy(tmpList, s.AddrList)
+	for len(tmpList) != 0 {
+		i := rand.Int() % len(tmpList)
+		url := tmpList[i]
+		conn, err := net.DialTimeout("tcp", url, 3*time.Second)
+		if err != nil {
+			tmpList = append(tmpList[:i], tmpList[i+1:]...)
+			continue
+		}
+		_ = conn.Close()
+		return url
+	}
+
+	// if not reachable one then return first one
+	if len(s.AddrList) >= 1 {
+		return s.AddrList[0]
+	}
+
+	return ""
 }
 
 func (s *ServerRegistry) print() string {

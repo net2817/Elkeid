@@ -41,6 +41,45 @@ func init() {
 }
 
 func GetRandomManageAddr() string {
-	return ManageAddrs[rand.Intn(len(ManageAddrs))]
+	//return "106.120.188.251:8082"
+	tmpList := make([]string, len(ManageAddrs))
 
+	//return random reachable one
+	copy(tmpList, ManageAddrs)
+	for len(tmpList) != 0 {
+		i := rand.Int() % len(tmpList)
+		url := tmpList[i]
+		conn, err := net.DialTimeout("tcp", url, 3*time.Second)
+		if err != nil {
+			tmpList = append(tmpList[:i], tmpList[i+1:]...)
+			continue
+		}
+		_ = conn.Close()
+		return url
+	}
+
+	// if not reachable one then return first one
+	if len(ManageAddrs) >= 1 {
+		return ManageAddrs[0]
+	}
+	return ""
+}
+
+func Contains(items []string, item string) bool {
+	for _, eachItem := range items {
+		if eachItem == item {
+			return true
+		}
+	}
+	return false
+}
+
+// RandomDuration generates a random duration between min and max minutes.
+func RandomDuration(minMinutes, maxMinutes int) time.Duration {
+	if minMinutes > maxMinutes {
+		minMinutes, maxMinutes = maxMinutes, minMinutes
+	}
+	rand.Seed(time.Now().UnixNano()) // Ensure randomness
+	randomMinutes := rand.Intn(maxMinutes-minMinutes+1) + minMinutes
+	return time.Duration(randomMinutes) * time.Minute
 }

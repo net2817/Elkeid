@@ -4,14 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
-	"time"
-
 	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	"github.com/gin-gonic/gin"
 	"github.com/levigross/grequests"
-	v1 "k8s.io/apiserver/pkg/apis/audit/v1"
+	"k8s.io/apiserver/pkg/apis/audit/v1"
+	"sync"
+	"time"
 )
 
 const (
@@ -144,9 +143,9 @@ func RDAudit(c *gin.Context) {
 }
 
 func getClusterIDList() ([]string, error) {
-	resp, err := grequests.Get(fmt.Sprintf(kubeClusterIDUrl, common.GetRandomManageAddr()), grequests.FromRequestOptions(&grequests.RequestOptions{
+	resp, err := grequests.Get(fmt.Sprintf(kubeClusterIDUrl, common.GetRandomManageAddr()), &grequests.RequestOptions{
 		RequestTimeout: 5 * time.Second,
-	}))
+	})
 	if err != nil {
 		return nil, err
 	}

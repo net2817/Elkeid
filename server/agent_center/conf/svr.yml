@@ -3,6 +3,8 @@
 manage:
   addrs:
     - 127.0.0.1:6701
+  username:
+  password:
 
 ############################# Service Discovery Settings #############################
 # addrs: addr list of service discovery.
@@ -59,8 +61,8 @@ server:
   ssl:
     keyfile: ./conf/server.key
     certfile: ./conf/server.crt
-    rawdata_keyfile: ./conf/rd_server.key
-    rawdata_certfile: ./conf/rd_server.crt
+    rawdata_keyfile: ./conf/server.key
+    rawdata_certfile: ./conf/server.crt
     cafile: ./conf/ca.crt
 
   grpc:

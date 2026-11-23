@@ -3,17 +3,19 @@ package grpc_handler
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
 	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
 	"github.com/bytedance/Elkeid/server/agent_center/httptrans/client"
-	"io"
-	"os"
-	"path"
-	"path/filepath"
 )
 
 type FileExtHandler struct {
@@ -34,6 +36,39 @@ func (h *FileExtHandler) Init() {
 			os.Exit(-1)
 		}
 	}
+}
+
+func (h *FileExtHandler) Download(request *pb.DownloadRequest, server pb.FileExt_DownloadServer) error {
+	file, err := client.GetFileFromRemote(request.GetToken())
+	if err != nil {
+		ylog.Errorf("Download", "GetFileFromRemote token %s error %s", request.GetToken(), err.Error())
+		return err
+	}
+	out, err := unZipSingleFileFromMemory(file)
+	if err != nil {
+		ylog.Errorf("Download", "unZipSingleFileFromMemory token %s error %s", request.GetToken(), err.Error())
+		return err
+	}
+
+	//根据2M(2097152) 拆分发送
+	bufRead := bytes.NewBuffer(out)
+	buf := make([]byte, 2097152)
+	for {
+		buf = bufRead.Next(2097150)
+		if len(buf) == 0 {
+			break
+		}
+
+		resp := &pb.DownloadResponse{
+			Data: buf,
+		}
+		err = server.Send(resp)
+		if err != nil {
+			ylog.Errorf("Download", "error while sending chunk: %s", err.Error())
+			return err
+		}
+	}
+	return nil
 }
 
 func (h *FileExtHandler) Upload(stream pb.FileExt_UploadServer) (err error) {
@@ -57,13 +92,13 @@ func (h *FileExtHandler) Upload(stream pb.FileExt_UploadServer) (err error) {
 		}
 
 		if firstChunk {
-			filePath = path.Join(h.FileBaseDir, fileRequest.Token)
-			fp, err = os.Create(filePath)
+			fp, err = os.CreateTemp(h.FileBaseDir, "cache-*")
 			if err != nil {
-				ylog.Errorf("FileExtHandler_Upload", "Unable to create file: %s", filePath)
+				ylog.Errorf("FileExtHandler_Upload", "Unable to CreateTemp: %s", h.FileBaseDir)
 				stream.SendAndClose(&pb.UploadResponse{Status: pb.UploadResponse_FAILED})
 				goto Fail
 			}
+			filePath = fp.Name()
 			fileBuf = bufio.NewWriter(fp)
 			token = fileRequest.Token
 			firstChunk = false
@@ -158,7 +193,7 @@ func handlerFile(token, filePath string) {
 		return
 	}
 
-	newPath, err := client.UploadFile(zipPath, hash)
+	newPath, err := client.UploadFile(zipPath, hash, token)
 	if err != nil {
 		item["status"] = TaskStatusFail
 		item["msg"] = fmt.Sprintf("handlerFile, UploadFile error %s, path %s.", err.Error(), filePath)
@@ -170,7 +205,7 @@ func handlerFile(token, filePath string) {
 	item["msg"] = newPath
 }
 
-//zip file
+// zip file
 func zipFile(zipFilePath, srcFilePath string) error {
 	newZipFile, err := os.Create(zipFilePath)
 	if err != nil {
@@ -204,6 +239,30 @@ func zipFile(zipFilePath, srcFilePath string) error {
 		return err
 	}
 	return nil
+}
+
+func unZipSingleFileFromMemory(in []byte) ([]byte, error) {
+	zipReader, err := zip.NewReader(bytes.NewReader(in), int64(len(in)))
+	if err != nil {
+		return nil, err
+	}
+	for _, zipFile := range zipReader.File {
+		unzippedFileBytes, err := readZipFile(zipFile)
+		if err != nil {
+			return nil, err
+		}
+		return unzippedFileBytes, nil
+	}
+	return nil, errors.New("no zip file found")
+}
+
+func readZipFile(zf *zip.File) ([]byte, error) {
+	f, err := zf.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 func fileMD5(filePath string) (string, error) {

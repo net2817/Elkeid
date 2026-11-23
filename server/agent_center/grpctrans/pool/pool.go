@@ -3,12 +3,15 @@ package pool
 import (
 	"context"
 	"errors"
+	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
 	"github.com/bytedance/Elkeid/server/agent_center/httptrans/client"
 	"github.com/patrickmn/go-cache"
 	"math/rand"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +35,13 @@ type GRPCPool struct {
 	extraInfoCache map[string]client.AgentExtraInfo
 
 	conf *Config
+
+	dynamicLimit        int32
+	dynamicLimitEndTime int64
+
+	//iaas info
+	iaasInfoMap  map[string]string
+	iaasInfoLock sync.RWMutex
 }
 
 // Connection Info
@@ -48,9 +58,18 @@ type Connection struct {
 	CreateAt   int64  `json:"create_at"`
 
 	agentDetailLock  sync.RWMutex
-	agentDetail      map[string]interface{} `json:"agent_detail"`
+	agentDetail      map[string]interface{}
 	pluginDetailLock sync.RWMutex
-	pluginDetail     map[string]map[string]interface{} `json:"plugin_detail"`
+	pluginDetail     map[string]map[string]interface{}
+
+	connUpdateStatLock sync.Mutex
+	connStatNeedSync   bool //是否需要把状态更新至manager端
+}
+
+// Init 初始化同步状态
+func (c *Connection) Init() {
+	c.connStatNeedSync = false
+	go c.connStatWorker()
 }
 
 func (c *Connection) GetAgentDetail() map[string]interface{} {
@@ -63,9 +82,40 @@ func (c *Connection) GetAgentDetail() map[string]interface{} {
 }
 
 func (c *Connection) SetAgentDetail(detail map[string]interface{}) {
+	updated := false
 	c.agentDetailLock.Lock()
-	defer c.agentDetailLock.Unlock()
-	c.agentDetail = detail
+	defer func() {
+		c.agentDetail = detail
+		c.agentDetailLock.Unlock()
+
+		if updated {
+			c.updateConnStat()
+		}
+	}()
+
+	if c.agentDetail == nil {
+		//新增agent
+		updated = true
+	} else {
+		//check Agent状态是否有变化
+		if !areAllEqual(c.agentDetail, detail, common.AgentUpdateKeys) {
+			updated = true
+		}
+
+		//异步检测是否有插件离线
+		time.AfterFunc(time.Second*10, func() {
+			c.pluginDetailLock.Lock()
+			defer c.pluginDetailLock.Unlock()
+			onlineTime := time.Now().Add(-120 * time.Second).Unix()
+			for k := range c.pluginDetail {
+				if c.pluginDetail[k]["last_heartbeat_time"].(int64) < onlineTime {
+					c.pluginDetail[k]["online"] = false
+					c.updateConnStat()
+					break
+				}
+			}
+		})
+	}
 }
 
 func (c *Connection) GetPluginDetail(name string) map[string]interface{} {
@@ -83,6 +133,17 @@ func (c *Connection) SetPluginDetail(name string, detail map[string]interface{})
 	if c.pluginDetail == nil {
 		c.pluginDetail = map[string]map[string]interface{}{}
 	}
+
+	//新增插件设置推送到远端
+	if p, ok := c.pluginDetail[name]; !ok {
+		c.updateConnStat()
+	} else {
+		//插件状态更新
+		if !areAllEqual(p, detail, common.PluginsUpdateKeys) {
+			c.updateConnStat()
+		}
+	}
+
 	c.pluginDetail[name] = detail
 }
 
@@ -96,6 +157,38 @@ func (c *Connection) GetPluginsList() []map[string]interface{} {
 	return res
 }
 
+func (c *Connection) updateConnStat() {
+	c.connUpdateStatLock.Lock()
+	defer c.connUpdateStatLock.Unlock()
+
+	if !c.connStatNeedSync {
+		c.connStatNeedSync = true
+	}
+}
+
+func (c *Connection) connStatWorker() {
+	ylog.Infof("GRPCPool", "%s connStatWorker start!", c.AgentID)
+	tk := time.NewTicker(10 * time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-tk.C:
+			c.connUpdateStatLock.Lock()
+			if c.connStatNeedSync {
+				c.connStatNeedSync = false
+				c.connUpdateStatLock.Unlock()
+				//agent_connection
+				client.HBWriter.Join(client.ConnStat{
+					AgentInfo:   c.GetAgentDetail(),
+					PluginsInfo: c.GetPluginsList(),
+				})
+			} else {
+				c.connUpdateStatLock.Unlock()
+			}
+		}
+	}
+}
+
 type Command struct {
 	Command *pb.Command
 	Error   error
@@ -106,14 +199,17 @@ type Command struct {
 // -- maxConnTokenCount: Maximum number of concurrent connections
 func NewGRPCPool(config *Config) *GRPCPool {
 	g := &GRPCPool{
-		connPool:       cache.New(-1, -1), //Never expire
-		tokenChan:      make(chan bool, config.PoolLength),
-		confChan:       make(chan string, config.ChanLen),
-		taskChan:       make(chan map[string]string, config.ChanLen),
-		taskList:       make([]map[string]string, 0, config.ChanLen),
-		extraInfoChan:  make(chan string, config.ChanLen),
-		extraInfoCache: make(map[string]client.AgentExtraInfo),
-		conf:           config,
+		connPool:            cache.New(-1, -1), //Never expire
+		tokenChan:           make(chan bool, config.PoolLength),
+		confChan:            make(chan string, config.ChanLen),
+		taskChan:            make(chan map[string]string, config.ChanLen),
+		taskList:            make([]map[string]string, 0, config.ChanLen),
+		extraInfoChan:       make(chan string, config.ChanLen),
+		extraInfoCache:      make(map[string]client.AgentExtraInfo),
+		iaasInfoMap:         make(map[string]string, 0),
+		conf:                config,
+		dynamicLimit:        -1,
+		dynamicLimitEndTime: 0,
 	}
 
 	for i := 0; i < config.PoolLength; i++ {
@@ -142,6 +238,28 @@ func (g *GRPCPool) checkConfig() {
 			config, err := client.GetConfigFromRemote(agentID, conn.GetAgentDetail())
 			if err != nil {
 				ylog.Errorf("GRPCPool", "postConfig Error %s %s", agentID, err.Error())
+
+				//拉取配置失败，随机断开TCP链接
+				go func() {
+					afterTime := common.RandomDuration(10, 60)
+					timer := time.NewTimer(afterTime)
+					ylog.Infof("GRPCPool", "scheduled to disconnect %s after:%s", agentID, afterTime.String())
+					select {
+					case <-timer.C:
+						ylog.Infof("GRPCPool", "now disconnect %s:", agentID)
+						conn.CancelFuc()
+						ylog.Infof("GRPCPool", "disconnect %s: done", agentID)
+					case <-conn.Ctx.Done():
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
+						ylog.Infof("GRPCPool", "disconnect %s: done", agentID)
+					}
+				}()
+
 				continue
 			}
 
@@ -184,6 +302,15 @@ func (g *GRPCPool) checkTask() {
 //
 //	Returns true when the current total number of connection < the length of the pool.
 func (g *GRPCPool) LoadToken() bool {
+	//临时限制
+	limit := int(atomic.LoadInt32(&g.dynamicLimit))
+	limitTime := atomic.LoadInt64(&g.dynamicLimitEndTime)
+	nowCount := g.GetCount()
+	if limit >= 0 && time.Now().Unix() < limitTime && nowCount >= limit {
+		ylog.Errorf("LoadToken", "hit dynamicLimit %d, lastTime %d, now count %d.", limit, limitTime, nowCount)
+		return false
+	}
+
 	select {
 	case _, ok := <-g.tokenChan:
 		if ok {
@@ -325,7 +452,7 @@ func (g *GRPCPool) refreshExtraInfo(interval time.Duration) {
 	for {
 		connMap := g.connPool.Items()
 		agentIDList := make([]string, 0)
-		for k, _ := range connMap {
+		for k := range connMap {
 			agentIDList = append(agentIDList, k)
 		}
 
@@ -352,4 +479,72 @@ func (g *GRPCPool) loadExtraInfoWorker() {
 			}
 		}
 	}
+}
+
+func (g *GRPCPool) SetDynamicLimit(val int32, lastSecond int64) {
+	atomic.StoreInt32(&g.dynamicLimit, val)
+	atomic.StoreInt64(&g.dynamicLimitEndTime, lastSecond+time.Now().Unix())
+
+	time.AfterFunc(time.Duration(lastSecond)*time.Second, func() {
+		atomic.StoreInt32(&g.dynamicLimit, -1)
+	})
+}
+
+func (g *GRPCPool) GetDynamicLimit() (val int32, lastSecond int64) {
+	val = atomic.LoadInt32(&g.dynamicLimit)
+	if val < 0 {
+		return -1, 0
+	}
+	return val, atomic.LoadInt64(&g.dynamicLimitEndTime) - time.Now().Unix()
+}
+
+func (g *GRPCPool) GetIaasInfo(agentID string, ipv4 []string, ipv6 []string) string {
+	g.iaasInfoLock.RLock()
+	tmp, ok := g.iaasInfoMap[agentID]
+	g.iaasInfoLock.RUnlock()
+	if ok {
+		return tmp
+	}
+
+	//load from manager
+	//TODO 增加重试逻辑
+	info, err := client.GetIaasInfoFromRemote(ipv4, ipv6)
+	if err != nil {
+		ylog.Errorf("GetIaasInfo", "%s %s %s error %s", agentID, ipv4, ipv6, err.Error())
+	}
+
+	g.iaasInfoLock.Lock()
+	g.iaasInfoMap[agentID] = info
+	g.iaasInfoLock.Unlock()
+	return info
+}
+
+func areAllEqual(local map[string]interface{}, remote map[string]interface{}, keys []string) bool {
+	for _, key := range keys {
+		if !areInterfacesEqual(local[key], remote[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func areInterfacesEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+
+	// 使用反射获取接口的值和类型信息
+	valA := reflect.ValueOf(a)
+	valB := reflect.ValueOf(b)
+
+	// 如果类型不同，直接返回 false
+	if valA.Type() != valB.Type() {
+		return false
+	}
+
+	// 比较接口的具体值
+	return reflect.DeepEqual(valA.Interface(), valB.Interface())
 }

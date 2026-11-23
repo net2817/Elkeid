@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
 	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
 	"github.com/levigross/grequests"
+	"time"
 )
 
 const (
-	ConfigUrl = `http://%s/api/v6/component/GetComponentInstances`
-	TagsUrl   = `http://%s/api/v1/agent/queryInfo`
+	ConfigUrl             = `http://%s/api/v6/component/GetComponentInstances`
+	TagsUrl               = `http://%s/api/v1/agent/queryInfo`
+	CheckCommonConfigUrl  = `http://%s/api/v6/investigate/auto_defense/CheckAgentConfig`
+	VerifyCommonConfigUrl = `http://%s/api/v6/investigate/auto_defense/VerifyAgentConfigRelease`
+	IaasInfoUrl           = `http://%s/api/v1/agent/getAssetGroup`
 )
 
 type ResAgentConf struct {
@@ -33,9 +36,10 @@ type ConfigMsg struct {
 }
 
 type AgentExtraInfo struct {
-	Tags    string `json:"tags"`
-	PSMName string `json:"psm_name"`
-	PSMPath string `json:"psm_path"`
+	Tags     string `json:"tags"`
+	PSMName  string `json:"psm_name"`
+	PSMPath  string `json:"psm_path"`
+	Enhanced string `json:"enhanced"`
 }
 
 type ResAgentTags struct {
@@ -46,9 +50,10 @@ type ResAgentTags struct {
 
 func GetConfigFromRemote(agentID string, detail map[string]interface{}) ([]*pb.ConfigItem, error) {
 	rOption := &grequests.RequestOptions{
-		JSON: detail,
+		JSON:    detail,
+		Headers: map[string]string{"token": GetToken()},
 	}
-	resp, err := grequests.Post(fmt.Sprintf(ConfigUrl, common.GetRandomManageAddr()), grequests.FromRequestOptions(rOption))
+	resp, err := grequests.Post(fmt.Sprintf(ConfigUrl, common.GetRandomManageAddr()), rOption)
 	if err != nil {
 		ylog.Errorf("GetConfigFromRemote", "error %s %s", agentID, err.Error())
 		return nil, err
@@ -87,7 +92,11 @@ func GetConfigFromRemote(agentID string, detail map[string]interface{}) ([]*pb.C
 func GetExtraInfoFromRemote(idList []string) (map[string]AgentExtraInfo, error) {
 	res := map[string]AgentExtraInfo{}
 	resp, err := grequests.Post(fmt.Sprintf(TagsUrl, common.GetRandomManageAddr()),
-		grequests.FromRequestOptions(&grequests.RequestOptions{JSON: map[string][]string{"id_list": idList}}))
+		&grequests.RequestOptions{
+			JSON:    map[string][]string{"id_list": idList},
+			Headers: map[string]string{"token": GetToken()},
+		},
+	)
 	if err != nil {
 		ylog.Errorf("GetExtraInfoFromRemote", "GetExtraInfoFromRemote Post Error, %s", err.Error())
 		return res, err
@@ -105,6 +114,145 @@ func GetExtraInfoFromRemote(idList []string) (map[string]AgentExtraInfo, error) 
 	}
 	if response.Code != 0 {
 		ylog.Errorf("GetExtraInfoFromRemote", "response code is not 0, %s %s ", resp.String())
+		return res, errors.New("response code is not 0")
+	}
+	return response.Data, nil
+}
+
+type ResCheckCommonConfig struct {
+	Code    int                           `json:"code"`
+	Message string                        `json:"msg"`
+	Data    *common.ConfigRefreshResponse `json:"data"`
+}
+
+func CheckCommonConfig(fp *pb.ConfigRefreshRequest) (*common.ConfigRefreshResponse, error) {
+	rOption := &grequests.RequestOptions{
+		JSON:    fp,
+		Headers: map[string]string{"token": GetToken()},
+	}
+	rOption.RequestTimeout = 15 * time.Second
+	resp, err := grequests.Post(fmt.Sprintf(CheckCommonConfigUrl, common.GetRandomManageAddr()), rOption)
+	if err != nil {
+		ylog.Errorf("CheckCommonConfig", "error %s %s %s", fp.AgentID, fp.PluginName, err.Error())
+		return nil, err
+	}
+	if !resp.Ok {
+		ylog.Errorf("CheckCommonConfig", "response code is not 200, AgentID: %s, StatusCode: %d,String: %s", fp.AgentID, resp.StatusCode, resp.String())
+		return nil, errors.New("status code is not ok")
+	}
+
+	var res = &common.Response{}
+	err = json.Unmarshal(resp.Bytes(), res)
+	if err != nil {
+		ylog.Errorf("CheckCommonConfig", "agentID: %s, error: %s, resp:%s", fp.AgentID, err.Error(), resp.String())
+		return nil, err
+	}
+
+	if res.Code != 0 {
+		ylog.Debugf("CheckCommonConfig", "response code is not 0, agentID: %s, resp: %s", fp.AgentID, resp.String())
+
+		//返回空值
+		return &common.ConfigRefreshResponse{
+			AgentID:    fp.AgentID,
+			PluginName: fp.PluginName,
+			SecretKey:  "",
+			Version:    "",
+			Release:    0,
+			Status:     0,
+			Config:     make([]*pb.ConfigDetail, 0),
+		}, nil
+	}
+
+	var resConfig = &ResCheckCommonConfig{}
+	err = json.Unmarshal(resp.Bytes(), resConfig)
+	if err != nil {
+		ylog.Errorf("CheckCommonConfig", "agentID: %s, error: %s, resp:%s", fp.AgentID, err.Error(), resp.String())
+		return nil, err
+	}
+	return resConfig.Data, nil
+}
+
+type ResVerifyCommonConfig struct {
+	Code    int                         `json:"code"`
+	Message string                      `json:"msg"`
+	Data    []*common.ConfigReleaseInfo `json:"data"`
+}
+
+func VerifyCommonConfigRelease(ri []*common.ConfigReleaseInfo) ([]*common.ConfigReleaseInfo, error) {
+	rOption := &grequests.RequestOptions{
+		JSON:    ri,
+		Headers: map[string]string{"token": GetToken()},
+	}
+	rOption.RequestTimeout = 15 * time.Second
+	resp, err := grequests.Post(fmt.Sprintf(VerifyCommonConfigUrl, common.GetRandomManageAddr()), rOption)
+	if err != nil {
+		ylog.Errorf("VerifyCommonConfigRelease", "error %s", err.Error())
+		return nil, err
+	}
+	if !resp.Ok {
+		ylog.Errorf("VerifyCommonConfigRelease", "response code is not 200, StatusCode: %d,String: %s", resp.StatusCode, resp.String())
+		return nil, errors.New("status code is not ok")
+	}
+
+	var res = &common.Response{}
+	err = json.Unmarshal(resp.Bytes(), res)
+	if err != nil {
+		ylog.Errorf("VerifyCommonConfigRelease", "error: %s, resp:%s", err.Error(), resp.String())
+		return nil, err
+	}
+	if res.Code != 0 {
+		ylog.Errorf("VerifyCommonConfigRelease", "response code is not 0, resp: %s", resp.String())
+		return nil, errors.New("response code is not 0")
+	}
+
+	var resConfig = &ResVerifyCommonConfig{}
+	err = json.Unmarshal(resp.Bytes(), resConfig)
+	if err != nil {
+		ylog.Errorf("VerifyCommonConfigRelease", "error: %s, resp:%s", err.Error(), resp.String())
+		return nil, err
+	}
+	return resConfig.Data, nil
+}
+
+type IaasInfoReq struct {
+	Ipv4 []string `json:"ipv4"`
+	Ipv6 []string `json:"Ipv6"`
+}
+
+type IaasInfoResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data string `json:"data"`
+}
+
+func GetIaasInfoFromRemote(ipv4 []string, ipv6 []string) (res string, err error) {
+	req := IaasInfoReq{
+		ipv4,
+		ipv6,
+	}
+	resp, err := grequests.Post(fmt.Sprintf(IaasInfoUrl, common.GetRandomManageAddr()),
+		&grequests.RequestOptions{
+			JSON:    req,
+			Headers: map[string]string{"token": GetToken()},
+		},
+	)
+	if err != nil {
+		ylog.Errorf("GetIaasInfoFromRemote", "Post Error, %s", err.Error())
+		return res, err
+	}
+
+	if !resp.Ok {
+		ylog.Errorf("GetIaasInfoFromRemote", "response code is not 200 but %d", resp.StatusCode)
+		return res, errors.New("status code is not ok")
+	}
+	var response IaasInfoResp
+	err = json.Unmarshal(resp.Bytes(), &response)
+	if err != nil {
+		ylog.Errorf("GetIaasInfoFromRemote", "Error, %s", resp.String())
+		return res, err
+	}
+	if response.Code != 0 {
+		ylog.Errorf("GetIaasInfoFromRemote", "response code is not 0, %s %s", resp.String())
 		return res, errors.New("response code is not 0")
 	}
 	return response.Data, nil

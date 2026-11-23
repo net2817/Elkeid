@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/bytedance/Elkeid/server/agent_center/common"
-	"github.com/bytedance/Elkeid/server/agent_center/common/kafka"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	"github.com/bytedance/Elkeid/server/agent_center/grpctrans/pool"
 	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
@@ -23,15 +22,16 @@ func handleRawData(req *pb.RawData, conn *pool.Connection) (agentID string) {
 	var exIpv6 = strings.Join(req.ExtranetIPv6, ",")
 	var SvrTime = time.Now().Unix()
 	var extraInfo = GlobalGRPCPool.GetExtraInfoByID(req.AgentID)
+	//var accountID = GlobalGRPCPool.GetIaasInfo(req.AgentID, req.IntranetIPv4, req.IntranetIPv6)
 
 	for k, v := range req.GetData() {
 		ylog.Debugf("handleRawData", "Num:%d Timestamp:%d, DataType:%d, AgentID:%s, Hostname:%s", k, v.GetTimestamp(), v.GetDataType(), req.AgentID, req.Hostname)
 
-		//Loading from the object pool, which can improve performance
-		mqMsg := kafka.MQMsgPool.Get().(*pb.MQData)
+		mqMsg := &pb.MQData{}
 		mqMsg.DataType = req.GetData()[k].DataType
 		mqMsg.AgentTime = req.GetData()[k].Timestamp
 		mqMsg.Body = req.GetData()[k].Body
+		mqMsg.AppendedBody = req.GetData()[k].AppendedBody
 		mqMsg.AgentID = req.AgentID
 		mqMsg.IntranetIPv4 = inIpv4
 		mqMsg.ExtranetIPv4 = exIpv4
@@ -43,10 +43,13 @@ func handleRawData(req *pb.RawData, conn *pool.Connection) (agentID string) {
 		mqMsg.SvrTime = SvrTime
 		mqMsg.PSMName = ""
 		mqMsg.PSMPath = ""
+		//mqMsg.AccountID = accountID
 		if extraInfo != nil {
 			mqMsg.Tag = extraInfo.Tags
+			mqMsg.Enhanced = extraInfo.Enhanced
 		} else {
 			mqMsg.Tag = ""
+			mqMsg.Enhanced = "false"
 		}
 
 		outputDataTypeCounter.With(prometheus.Labels{"data_type": fmt.Sprint(mqMsg.DataType)}).Add(float64(1))
@@ -66,23 +69,44 @@ func handleRawData(req *pb.RawData, conn *pool.Connection) (agentID string) {
 					metricsAgentHeartBeat(req.AgentID, name, detail)
 				}
 			}
-		case 2001, 2003, 6000, 5100, 5101, 8010:
+		case 2001, 2003, 6000, 5100, 5101, 8010, 1021, 1022, 1023, 1024, 1025, 1101, 1031:
 			// Asynchronously pushed to the remote end for reconciliation.
 
 			//5100: 主动触发资产数据扫描
 			//5101: 组件版本验证
 			//8010: 基线扫描
-			//task数据。需要 对账+存储db
+			//1021,1022: 插件启动后首次心跳，插件退出日志
+			//1031: 文件主动上传
+			//1021-1025: Agent/Plugins status
+			//需要发送给manager的数据
 			item, err := parseRecord(req.GetData()[k])
 			if err != nil {
 				continue
 			}
+
 			item["data_type"] = fmt.Sprintf("%d", mqMsg.DataType)
+			switch mqMsg.DataType {
+			case 1021, 1022, 1023, 1024, 1025, 1101, 1031:
+				//不包含token的数据
+				item["agent_id"] = mqMsg.AgentID
+				item["time"] = fmt.Sprintf("%d", mqMsg.AgentTime)
+				item["time_pkg"] = fmt.Sprintf("%d", SvrTime)
+				item["in_ipv4_list"] = mqMsg.IntranetIPv4
+				item["in_ipv6_list"] = mqMsg.IntranetIPv6
+				item["ex_ipv4_list"] = mqMsg.ExtranetIPv4
+				item["ex_ipv6_list"] = mqMsg.ExtranetIPv6
+				item["version"] = mqMsg.Version
+				item["hostname"] = mqMsg.Hostname
+				item["product"] = mqMsg.Product
+				item["token"] = "token" //适配格式
+			default:
+			}
+
 			err = GlobalGRPCPool.PushTask2Manager(item)
 			if err != nil {
 				ylog.Errorf("handleRawData", "PushTask2Manager error %s", err.Error())
 			}
-		case 1010, 1011:
+		case 1010:
 			//agent or plugin error log
 			item, err := parseRecord(req.GetData()[k])
 			if err != nil {
@@ -119,15 +143,26 @@ func parseAgentHeartBeat(record *pb.Record, req *pb.RawData, conn *pool.Connecti
 		return nil
 	}
 
-	//存储心跳数据到connect
+	//强制校验心跳字段
 	detail := make(map[string]interface{}, len(hb)+9)
 	for k, v := range hb {
-		//部分字段不需要修改
-		if k == "platform_version" || k == "version" || k == "host_serial" || k == "host_id" || k == "host_model" || k == "host_vendor" || k == "cpu_name" {
+		//必须为string
+		if common.Contains(common.StringHBFields, k) {
 			detail[k] = v
 			continue
 		}
+		//必须为float
+		if common.Contains(common.FloatHBFields, k) {
+			fv, err := strconv.ParseFloat(v, 64)
+			if err != nil || math.IsNaN(fv) || math.IsInf(fv, 0) {
+				detail[k] = 0
+			} else {
+				detail[k] = fv
+			}
+			continue
+		}
 
+		//其他字段
 		fv, err := strconv.ParseFloat(v, 64)
 		if err != nil || math.IsNaN(fv) || math.IsInf(fv, 0) {
 			detail[k] = v
@@ -135,6 +170,7 @@ func parseAgentHeartBeat(record *pb.Record, req *pb.RawData, conn *pool.Connecti
 			detail[k] = fv
 		}
 	}
+
 	detail["agent_id"] = req.AgentID
 	detail["agent_addr"] = conn.SourceAddr
 	detail["create_at"] = conn.CreateAt
@@ -163,17 +199,24 @@ func parseAgentHeartBeat(record *pb.Record, req *pb.RawData, conn *pool.Connecti
 	detail["product"] = req.Product
 
 	//last heartbeat time get from server
+	detail["online"] = true
 	detail["last_heartbeat_time"] = time.Now().Unix()
+
+	detail["source_ip"] = common.LocalIP
+	detail["source_ipv4"] = common.LocalIP
+	detail["source_ipv6"] = ""
+	detail["source_port"] = common.HttpPort
 
 	if len(conn.GetAgentDetail()) == 0 {
 		conn.SetAgentDetail(detail)
 
-		//Every time the agent connects to the server
-		//it needs to push the latest configuration to agent
-		err = GlobalGRPCPool.PostLatestConfig(req.AgentID)
-		if err != nil {
-			ylog.Errorf("Transfer", "send config error, %s %s", req.AgentID, err.Error())
-		}
+		//等待2分钟，再推送配置，防止Agent心跳未写入导致配置拉取失败
+		time.AfterFunc(2*time.Minute, func() {
+			err = GlobalGRPCPool.PostLatestConfig(req.AgentID)
+			if err != nil {
+				ylog.Errorf("Transfer", "send config error, %s %s", req.AgentID, err.Error())
+			}
+		})
 	} else {
 		conn.SetAgentDetail(detail)
 	}
@@ -210,6 +253,7 @@ func parsePluginHeartBeat(record *pb.Record, req *pb.RawData, conn *pool.Connect
 	}
 	//last heartbeat time get from server
 	detail["last_heartbeat_time"] = time.Now().Unix()
+	detail["online"] = true
 
 	conn.SetPluginDetail(pluginName, detail)
 	return detail

@@ -3,10 +3,13 @@ package grpc_handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/bytedance/Elkeid/server/agent_center/common"
 	"github.com/bytedance/Elkeid/server/agent_center/common/ylog"
 	"github.com/bytedance/Elkeid/server/agent_center/grpctrans/pool"
 	pb "github.com/bytedance/Elkeid/server/agent_center/grpctrans/proto"
+	"github.com/bytedance/Elkeid/server/agent_center/httptrans/client"
+	"github.com/rs/xid"
 	"google.golang.org/grpc/peer"
 	"time"
 )
@@ -21,6 +24,7 @@ var (
 func InitGlobalGRPCPool() {
 	option := pool.NewConfig()
 	option.PoolLength = common.ConnLimit
+	option.ChanLen = common.ConnLimit * 2
 	GlobalGRPCPool = pool.NewGRPCPool(option)
 }
 
@@ -49,7 +53,7 @@ func (h *TransferHandler) Transfer(stream pb.Transfer_TransferServer) error {
 		ylog.Errorf("Transfer", "Transfer error %s", err.Error())
 		return err
 	}
-	addr := p.Addr.String()
+	addr := fmt.Sprintf("%s-%s", p.Addr.String(), xid.New().String())
 	ylog.Infof("Transfer", ">>>>connection addr: %s", addr)
 
 	//add connection info to the GlobalGRPCPool
@@ -63,6 +67,7 @@ func (h *TransferHandler) Transfer(stream pb.Transfer_TransferServer) error {
 		Ctx:         ctx,
 		CancelFuc:   cancelButton,
 	}
+	connection.Init()
 	ylog.Infof("Transfer", ">>>>now set %s %v", agentID, connection)
 	err = GlobalGRPCPool.Add(agentID, &connection)
 	if err != nil {
@@ -72,7 +77,22 @@ func (h *TransferHandler) Transfer(stream pb.Transfer_TransferServer) error {
 	defer func() {
 		ylog.Infof("Transfer", "now delete %s ", agentID)
 		GlobalGRPCPool.Delete(agentID)
+
+		//删除配置
+		if GlobalConfigHandler != nil {
+			GlobalConfigHandler.Delete(agentID)
+		}
+
 		releaseAgentHeartbeatMetrics(agentID)
+
+		//延迟6秒删除，避免状态被Join覆盖
+		time.AfterFunc(time.Second*6, func() {
+			ylog.Infof("Evict", "HeartBeatEvict AgentID %s, AgentAddr: %s.", agentID, addr)
+			client.HBWriter.Evict(client.HeartBeatEvictModel{
+				AgentID:   agentID,
+				AgentAddr: addr,
+			})
+		})
 	}()
 
 	//Process the first of data

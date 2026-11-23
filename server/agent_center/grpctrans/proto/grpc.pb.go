@@ -26,6 +26,85 @@ var _ = math.Inf
 // proto package needs to be updated.
 const _ = proto.ProtoPackageIsVersion3 // please upgrade the proto package
 
+// pb for config refresh
+type ConfigStatusCode int32
+
+const (
+	ConfigStatusCode_SUCCESS ConfigStatusCode = 0
+	ConfigStatusCode_FAILED  ConfigStatusCode = 1
+)
+
+var ConfigStatusCode_name = map[int32]string{
+	0: "SUCCESS",
+	1: "FAILED",
+}
+
+var ConfigStatusCode_value = map[string]int32{
+	"SUCCESS": 0,
+	"FAILED":  1,
+}
+
+func (x ConfigStatusCode) String() string {
+	return proto.EnumName(ConfigStatusCode_name, int32(x))
+}
+
+func (ConfigStatusCode) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{0}
+}
+
+type ConfigTypeCode int32
+
+const (
+	ConfigTypeCode_File   ConfigTypeCode = 0
+	ConfigTypeCode_Config ConfigTypeCode = 1
+	ConfigTypeCode_Remove ConfigTypeCode = 2
+)
+
+var ConfigTypeCode_name = map[int32]string{
+	0: "File",
+	1: "Config",
+	2: "Remove",
+}
+
+var ConfigTypeCode_value = map[string]int32{
+	"File":   0,
+	"Config": 1,
+	"Remove": 2,
+}
+
+func (x ConfigTypeCode) String() string {
+	return proto.EnumName(ConfigTypeCode_name, int32(x))
+}
+
+func (ConfigTypeCode) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{1}
+}
+
+type ConfigFPStatusCode int32
+
+const (
+	ConfigFPStatusCode_Exist       ConfigFPStatusCode = 0
+	ConfigFPStatusCode_Nonexistent ConfigFPStatusCode = 1
+)
+
+var ConfigFPStatusCode_name = map[int32]string{
+	0: "Exist",
+	1: "Nonexistent",
+}
+
+var ConfigFPStatusCode_value = map[string]int32{
+	"Exist":       0,
+	"Nonexistent": 1,
+}
+
+func (x ConfigFPStatusCode) String() string {
+	return proto.EnumName(ConfigFPStatusCode_name, int32(x))
+}
+
+func (ConfigFPStatusCode) EnumDescriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{2}
+}
+
 type UploadResponse_StatusCode int32
 
 const (
@@ -48,11 +127,11 @@ func (x UploadResponse_StatusCode) String() string {
 }
 
 func (UploadResponse_StatusCode) EnumDescriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{9, 0}
+	return fileDescriptor_bedfbfc9b54e5600, []int{11, 0}
 }
 
-//pb for rawdata
-//agent --> server
+// pb for rawdata
+// agent --> server
 type RawData struct {
 	Data                 []*Record `protobuf:"bytes,1,rep,name=Data,proto3" json:"Data,omitempty"`
 	AgentID              string    `protobuf:"bytes,2,opt,name=AgentID,proto3" json:"AgentID,omitempty"`
@@ -168,6 +247,7 @@ type Record struct {
 	DataType             int32    `protobuf:"varint,1,opt,name=DataType,proto3" json:"DataType,omitempty"`
 	Timestamp            int64    `protobuf:"varint,2,opt,name=Timestamp,proto3" json:"Timestamp,omitempty"`
 	Body                 []byte   `protobuf:"bytes,3,opt,name=Body,proto3" json:"Body,omitempty"`
+	AppendedBody         []byte   `protobuf:"bytes,4,opt,name=AppendedBody,proto3" json:"AppendedBody,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -227,6 +307,13 @@ func (m *Record) GetBody() []byte {
 	return nil
 }
 
+func (m *Record) GetAppendedBody() []byte {
+	if m != nil {
+		return m.AppendedBody
+	}
+	return nil
+}
+
 type Item struct {
 	Fields               map[string]string `protobuf:"bytes,1,rep,name=Fields,proto3" json:"Fields,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	XXX_NoUnkeyedLiteral struct{}          `json:"-"`
@@ -274,7 +361,109 @@ func (m *Item) GetFields() map[string]string {
 	return nil
 }
 
-//server --> agent
+type Field struct {
+	Key                  string   `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value                string   `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *Field) Reset()         { *m = Field{} }
+func (m *Field) String() string { return proto.CompactTextString(m) }
+func (*Field) ProtoMessage()    {}
+func (*Field) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{3}
+}
+func (m *Field) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *Field) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_Field.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *Field) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_Field.Merge(m, src)
+}
+func (m *Field) XXX_Size() int {
+	return m.Size()
+}
+func (m *Field) XXX_DiscardUnknown() {
+	xxx_messageInfo_Field.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_Field proto.InternalMessageInfo
+
+func (m *Field) GetKey() string {
+	if m != nil {
+		return m.Key
+	}
+	return ""
+}
+
+func (m *Field) GetValue() string {
+	if m != nil {
+		return m.Value
+	}
+	return ""
+}
+
+type ItemArray struct {
+	Fields               []*Field `protobuf:"bytes,1,rep,name=fields,proto3" json:"fields,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *ItemArray) Reset()         { *m = ItemArray{} }
+func (m *ItemArray) String() string { return proto.CompactTextString(m) }
+func (*ItemArray) ProtoMessage()    {}
+func (*ItemArray) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{4}
+}
+func (m *ItemArray) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ItemArray) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ItemArray.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ItemArray) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ItemArray.Merge(m, src)
+}
+func (m *ItemArray) XXX_Size() int {
+	return m.Size()
+}
+func (m *ItemArray) XXX_DiscardUnknown() {
+	xxx_messageInfo_ItemArray.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ItemArray proto.InternalMessageInfo
+
+func (m *ItemArray) GetFields() []*Field {
+	if m != nil {
+		return m.Fields
+	}
+	return nil
+}
+
+// server --> agent
 type Command struct {
 	AgentCtrl            int32         `protobuf:"varint,1,opt,name=AgentCtrl,proto3" json:"AgentCtrl,omitempty"`
 	Task                 *PluginTask   `protobuf:"bytes,2,opt,name=Task,proto3" json:"Task,omitempty"`
@@ -288,7 +477,7 @@ func (m *Command) Reset()         { *m = Command{} }
 func (m *Command) String() string { return proto.CompactTextString(m) }
 func (*Command) ProtoMessage()    {}
 func (*Command) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{3}
+	return fileDescriptor_bedfbfc9b54e5600, []int{5}
 }
 func (m *Command) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -339,13 +528,13 @@ func (m *Command) GetConfig() []*ConfigItem {
 }
 
 type PluginTask struct {
-	//DataType which used to uniquely identify different  format of Data
+	// 新增DataType对Data进行控制
 	DataType int32 `protobuf:"varint,1,opt,name=DataType,proto3" json:"DataType,omitempty"`
-	// Plugin name, which used to uniquely identify different plugins
+	// 插件名字
 	Name string `protobuf:"bytes,2,opt,name=Name,proto3" json:"Name,omitempty"`
-	// Data transparently transmitted to the plugin
+	// JSON
 	Data string `protobuf:"bytes,3,opt,name=Data,proto3" json:"Data,omitempty"`
-	// The token is used for reconciliation
+	// 对账
 	Token                string   `protobuf:"bytes,4,opt,name=Token,proto3" json:"Token,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
@@ -356,7 +545,7 @@ func (m *PluginTask) Reset()         { *m = PluginTask{} }
 func (m *PluginTask) String() string { return proto.CompactTextString(m) }
 func (*PluginTask) ProtoMessage()    {}
 func (*PluginTask) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{4}
+	return fileDescriptor_bedfbfc9b54e5600, []int{6}
 }
 func (m *PluginTask) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -430,7 +619,7 @@ func (m *ConfigItem) Reset()         { *m = ConfigItem{} }
 func (m *ConfigItem) String() string { return proto.CompactTextString(m) }
 func (*ConfigItem) ProtoMessage()    {}
 func (*ConfigItem) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{5}
+	return fileDescriptor_bedfbfc9b54e5600, []int{7}
 }
 func (m *ConfigItem) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -508,7 +697,7 @@ func (m *ConfigItem) GetDetail() string {
 	return ""
 }
 
-//server -> bmq
+// server -> bmq
 type MQData struct {
 	DataType     int32  `protobuf:"varint,1,opt,name=DataType,proto3" json:"DataType,omitempty"`
 	AgentTime    int64  `protobuf:"varint,2,opt,name=AgentTime,proto3" json:"AgentTime,omitempty"`
@@ -521,11 +710,15 @@ type MQData struct {
 	Hostname     string `protobuf:"bytes,9,opt,name=Hostname,proto3" json:"Hostname,omitempty"`
 	Version      string `protobuf:"bytes,10,opt,name=Version,proto3" json:"Version,omitempty"`
 	Product      string `protobuf:"bytes,11,opt,name=Product,proto3" json:"Product,omitempty"`
-	//Fields completed on the server
+	// server端补全字段
 	SvrTime              int64    `protobuf:"varint,12,opt,name=SvrTime,proto3" json:"SvrTime,omitempty"`
 	PSMName              string   `protobuf:"bytes,13,opt,name=PSMName,proto3" json:"PSMName,omitempty"`
 	PSMPath              string   `protobuf:"bytes,14,opt,name=PSMPath,proto3" json:"PSMPath,omitempty"`
 	Tag                  string   `protobuf:"bytes,15,opt,name=Tag,proto3" json:"Tag,omitempty"`
+	Enhanced             string   `protobuf:"bytes,16,opt,name=Enhanced,proto3" json:"Enhanced,omitempty"`
+	IsHoneypot           string   `protobuf:"bytes,17,opt,name=IsHoneypot,proto3" json:"IsHoneypot,omitempty"`
+	AppendedBody         []byte   `protobuf:"bytes,18,opt,name=AppendedBody,proto3" json:"AppendedBody,omitempty"`
+	AccountID            string   `protobuf:"bytes,19,opt,name=AccountID,proto3" json:"AccountID,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`
 	XXX_sizecache        int32    `json:"-"`
@@ -535,7 +728,7 @@ func (m *MQData) Reset()         { *m = MQData{} }
 func (m *MQData) String() string { return proto.CompactTextString(m) }
 func (*MQData) ProtoMessage()    {}
 func (*MQData) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{6}
+	return fileDescriptor_bedfbfc9b54e5600, []int{8}
 }
 func (m *MQData) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -669,7 +862,35 @@ func (m *MQData) GetTag() string {
 	return ""
 }
 
-//bmq --> Rule engine
+func (m *MQData) GetEnhanced() string {
+	if m != nil {
+		return m.Enhanced
+	}
+	return ""
+}
+
+func (m *MQData) GetIsHoneypot() string {
+	if m != nil {
+		return m.IsHoneypot
+	}
+	return ""
+}
+
+func (m *MQData) GetAppendedBody() []byte {
+	if m != nil {
+		return m.AppendedBody
+	}
+	return nil
+}
+
+func (m *MQData) GetAccountID() string {
+	if m != nil {
+		return m.AccountID
+	}
+	return ""
+}
+
+// bmq --> Rule engine
 type MQRawData struct {
 	DataType     int32  `protobuf:"varint,1,opt,name=DataType,proto3" json:"DataType,omitempty"`
 	AgentTime    int64  `protobuf:"varint,2,opt,name=AgentTime,proto3" json:"AgentTime,omitempty"`
@@ -682,21 +903,26 @@ type MQRawData struct {
 	Hostname     string `protobuf:"bytes,9,opt,name=Hostname,proto3" json:"Hostname,omitempty"`
 	Version      string `protobuf:"bytes,10,opt,name=Version,proto3" json:"Version,omitempty"`
 	Product      string `protobuf:"bytes,11,opt,name=Product,proto3" json:"Product,omitempty"`
-	//Fields completed on the server
-	SvrTime              int64    `protobuf:"varint,12,opt,name=SvrTime,proto3" json:"SvrTime,omitempty"`
-	PSMName              string   `protobuf:"bytes,13,opt,name=PSMName,proto3" json:"PSMName,omitempty"`
-	PSMPath              string   `protobuf:"bytes,14,opt,name=PSMPath,proto3" json:"PSMPath,omitempty"`
-	Tags                 string   `protobuf:"bytes,15,opt,name=Tags,proto3" json:"Tags,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+	// server端补全字段
+	SvrTime    int64  `protobuf:"varint,12,opt,name=SvrTime,proto3" json:"SvrTime,omitempty"`
+	PSMName    string `protobuf:"bytes,13,opt,name=PSMName,proto3" json:"PSMName,omitempty"`
+	PSMPath    string `protobuf:"bytes,14,opt,name=PSMPath,proto3" json:"PSMPath,omitempty"`
+	Tag        string `protobuf:"bytes,15,opt,name=Tag,proto3" json:"Tag,omitempty"`
+	Enhanced   string `protobuf:"bytes,16,opt,name=Enhanced,proto3" json:"Enhanced,omitempty"`
+	IsHoneypot string `protobuf:"bytes,17,opt,name=IsHoneypot,proto3" json:"IsHoneypot,omitempty"`
+	// agent appended字段
+	AppendedBody         *ItemArray `protobuf:"bytes,18,opt,name=AppendedBody,proto3" json:"AppendedBody,omitempty"`
+	AccountID            string     `protobuf:"bytes,19,opt,name=AccountID,proto3" json:"AccountID,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}   `json:"-"`
+	XXX_unrecognized     []byte     `json:"-"`
+	XXX_sizecache        int32      `json:"-"`
 }
 
 func (m *MQRawData) Reset()         { *m = MQRawData{} }
 func (m *MQRawData) String() string { return proto.CompactTextString(m) }
 func (*MQRawData) ProtoMessage()    {}
 func (*MQRawData) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{7}
+	return fileDescriptor_bedfbfc9b54e5600, []int{9}
 }
 func (m *MQRawData) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -823,14 +1049,42 @@ func (m *MQRawData) GetPSMPath() string {
 	return ""
 }
 
-func (m *MQRawData) GetTags() string {
+func (m *MQRawData) GetTag() string {
 	if m != nil {
-		return m.Tags
+		return m.Tag
 	}
 	return ""
 }
 
-//pb for file upload
+func (m *MQRawData) GetEnhanced() string {
+	if m != nil {
+		return m.Enhanced
+	}
+	return ""
+}
+
+func (m *MQRawData) GetIsHoneypot() string {
+	if m != nil {
+		return m.IsHoneypot
+	}
+	return ""
+}
+
+func (m *MQRawData) GetAppendedBody() *ItemArray {
+	if m != nil {
+		return m.AppendedBody
+	}
+	return nil
+}
+
+func (m *MQRawData) GetAccountID() string {
+	if m != nil {
+		return m.AccountID
+	}
+	return ""
+}
+
+// pb for file upload
 type UploadRequest struct {
 	Token                string   `protobuf:"bytes,1,opt,name=Token,proto3" json:"Token,omitempty"`
 	Data                 []byte   `protobuf:"bytes,2,opt,name=Data,proto3" json:"Data,omitempty"`
@@ -843,7 +1097,7 @@ func (m *UploadRequest) Reset()         { *m = UploadRequest{} }
 func (m *UploadRequest) String() string { return proto.CompactTextString(m) }
 func (*UploadRequest) ProtoMessage()    {}
 func (*UploadRequest) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{8}
+	return fileDescriptor_bedfbfc9b54e5600, []int{10}
 }
 func (m *UploadRequest) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -897,7 +1151,7 @@ func (m *UploadResponse) Reset()         { *m = UploadResponse{} }
 func (m *UploadResponse) String() string { return proto.CompactTextString(m) }
 func (*UploadResponse) ProtoMessage()    {}
 func (*UploadResponse) Descriptor() ([]byte, []int) {
-	return fileDescriptor_bedfbfc9b54e5600, []int{9}
+	return fileDescriptor_bedfbfc9b54e5600, []int{11}
 }
 func (m *UploadResponse) XXX_Unmarshal(b []byte) error {
 	return m.Unmarshal(b)
@@ -933,12 +1187,411 @@ func (m *UploadResponse) GetStatus() UploadResponse_StatusCode {
 	return UploadResponse_SUCCESS
 }
 
+type DownloadRequest struct {
+	Token                string   `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *DownloadRequest) Reset()         { *m = DownloadRequest{} }
+func (m *DownloadRequest) String() string { return proto.CompactTextString(m) }
+func (*DownloadRequest) ProtoMessage()    {}
+func (*DownloadRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{12}
+}
+func (m *DownloadRequest) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *DownloadRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_DownloadRequest.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *DownloadRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_DownloadRequest.Merge(m, src)
+}
+func (m *DownloadRequest) XXX_Size() int {
+	return m.Size()
+}
+func (m *DownloadRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_DownloadRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_DownloadRequest proto.InternalMessageInfo
+
+func (m *DownloadRequest) GetToken() string {
+	if m != nil {
+		return m.Token
+	}
+	return ""
+}
+
+type DownloadResponse struct {
+	Data                 []byte   `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	XXX_NoUnkeyedLiteral struct{} `json:"-"`
+	XXX_unrecognized     []byte   `json:"-"`
+	XXX_sizecache        int32    `json:"-"`
+}
+
+func (m *DownloadResponse) Reset()         { *m = DownloadResponse{} }
+func (m *DownloadResponse) String() string { return proto.CompactTextString(m) }
+func (*DownloadResponse) ProtoMessage()    {}
+func (*DownloadResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{13}
+}
+func (m *DownloadResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *DownloadResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_DownloadResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *DownloadResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_DownloadResponse.Merge(m, src)
+}
+func (m *DownloadResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *DownloadResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_DownloadResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_DownloadResponse proto.InternalMessageInfo
+
+func (m *DownloadResponse) GetData() []byte {
+	if m != nil {
+		return m.Data
+	}
+	return nil
+}
+
+type ConfigRefreshRequest struct {
+	AgentID              string               `protobuf:"bytes,1,opt,name=AgentID,proto3" json:"agent_id,omitempty"`
+	PluginName           string               `protobuf:"bytes,2,opt,name=PluginName,proto3" json:"plugin,omitempty"`
+	Fingerprint          []*ConfigFingerPrint `protobuf:"bytes,3,rep,name=Fingerprint,proto3" json:"configs,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}             `json:"-"`
+	XXX_unrecognized     []byte               `json:"-"`
+	XXX_sizecache        int32                `json:"-"`
+}
+
+func (m *ConfigRefreshRequest) Reset()         { *m = ConfigRefreshRequest{} }
+func (m *ConfigRefreshRequest) String() string { return proto.CompactTextString(m) }
+func (*ConfigRefreshRequest) ProtoMessage()    {}
+func (*ConfigRefreshRequest) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{14}
+}
+func (m *ConfigRefreshRequest) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ConfigRefreshRequest) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ConfigRefreshRequest.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ConfigRefreshRequest) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ConfigRefreshRequest.Merge(m, src)
+}
+func (m *ConfigRefreshRequest) XXX_Size() int {
+	return m.Size()
+}
+func (m *ConfigRefreshRequest) XXX_DiscardUnknown() {
+	xxx_messageInfo_ConfigRefreshRequest.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ConfigRefreshRequest proto.InternalMessageInfo
+
+func (m *ConfigRefreshRequest) GetAgentID() string {
+	if m != nil {
+		return m.AgentID
+	}
+	return ""
+}
+
+func (m *ConfigRefreshRequest) GetPluginName() string {
+	if m != nil {
+		return m.PluginName
+	}
+	return ""
+}
+
+func (m *ConfigRefreshRequest) GetFingerprint() []*ConfigFingerPrint {
+	if m != nil {
+		return m.Fingerprint
+	}
+	return nil
+}
+
+type ConfigFingerPrint struct {
+	Path                 string             `protobuf:"bytes,1,opt,name=Path,proto3" json:"path,omitempty"`
+	Hash                 string             `protobuf:"bytes,2,opt,name=Hash,proto3" json:"hash,omitempty"`
+	Status               ConfigFPStatusCode `protobuf:"varint,3,opt,name=Status,proto3,enum=grpc.ConfigFPStatusCode" json:"status,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}           `json:"-"`
+	XXX_unrecognized     []byte             `json:"-"`
+	XXX_sizecache        int32              `json:"-"`
+}
+
+func (m *ConfigFingerPrint) Reset()         { *m = ConfigFingerPrint{} }
+func (m *ConfigFingerPrint) String() string { return proto.CompactTextString(m) }
+func (*ConfigFingerPrint) ProtoMessage()    {}
+func (*ConfigFingerPrint) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{15}
+}
+func (m *ConfigFingerPrint) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ConfigFingerPrint) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ConfigFingerPrint.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ConfigFingerPrint) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ConfigFingerPrint.Merge(m, src)
+}
+func (m *ConfigFingerPrint) XXX_Size() int {
+	return m.Size()
+}
+func (m *ConfigFingerPrint) XXX_DiscardUnknown() {
+	xxx_messageInfo_ConfigFingerPrint.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ConfigFingerPrint proto.InternalMessageInfo
+
+func (m *ConfigFingerPrint) GetPath() string {
+	if m != nil {
+		return m.Path
+	}
+	return ""
+}
+
+func (m *ConfigFingerPrint) GetHash() string {
+	if m != nil {
+		return m.Hash
+	}
+	return ""
+}
+
+func (m *ConfigFingerPrint) GetStatus() ConfigFPStatusCode {
+	if m != nil {
+		return m.Status
+	}
+	return ConfigFPStatusCode_Exist
+}
+
+type ConfigRefreshResponse struct {
+	PluginName           string           `protobuf:"bytes,1,opt,name=PluginName,proto3" json:"PluginName,omitempty"`
+	SecretKey            string           `protobuf:"bytes,2,opt,name=SecretKey,proto3" json:"SecretKey,omitempty"`
+	Version              string           `protobuf:"bytes,3,opt,name=Version,proto3" json:"Version,omitempty"`
+	Release              uint64           `protobuf:"varint,4,opt,name=Release,proto3" json:"Release,omitempty"`
+	Status               ConfigStatusCode `protobuf:"varint,5,opt,name=Status,proto3,enum=grpc.ConfigStatusCode" json:"Status,omitempty"`
+	Config               []*ConfigDetail  `protobuf:"bytes,6,rep,name=Config,proto3" json:"Config,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
+	XXX_unrecognized     []byte           `json:"-"`
+	XXX_sizecache        int32            `json:"-"`
+}
+
+func (m *ConfigRefreshResponse) Reset()         { *m = ConfigRefreshResponse{} }
+func (m *ConfigRefreshResponse) String() string { return proto.CompactTextString(m) }
+func (*ConfigRefreshResponse) ProtoMessage()    {}
+func (*ConfigRefreshResponse) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{16}
+}
+func (m *ConfigRefreshResponse) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ConfigRefreshResponse) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ConfigRefreshResponse.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ConfigRefreshResponse) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ConfigRefreshResponse.Merge(m, src)
+}
+func (m *ConfigRefreshResponse) XXX_Size() int {
+	return m.Size()
+}
+func (m *ConfigRefreshResponse) XXX_DiscardUnknown() {
+	xxx_messageInfo_ConfigRefreshResponse.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ConfigRefreshResponse proto.InternalMessageInfo
+
+func (m *ConfigRefreshResponse) GetPluginName() string {
+	if m != nil {
+		return m.PluginName
+	}
+	return ""
+}
+
+func (m *ConfigRefreshResponse) GetSecretKey() string {
+	if m != nil {
+		return m.SecretKey
+	}
+	return ""
+}
+
+func (m *ConfigRefreshResponse) GetVersion() string {
+	if m != nil {
+		return m.Version
+	}
+	return ""
+}
+
+func (m *ConfigRefreshResponse) GetRelease() uint64 {
+	if m != nil {
+		return m.Release
+	}
+	return 0
+}
+
+func (m *ConfigRefreshResponse) GetStatus() ConfigStatusCode {
+	if m != nil {
+		return m.Status
+	}
+	return ConfigStatusCode_SUCCESS
+}
+
+func (m *ConfigRefreshResponse) GetConfig() []*ConfigDetail {
+	if m != nil {
+		return m.Config
+	}
+	return nil
+}
+
+type ConfigDetail struct {
+	Path                 string           `protobuf:"bytes,1,opt,name=Path,proto3" json:"path,omitempty"`
+	Status               ConfigStatusCode `protobuf:"varint,2,opt,name=Status,proto3,enum=grpc.ConfigStatusCode" json:"status,omitempty"`
+	Data                 string           `protobuf:"bytes,3,opt,name=Data,proto3" json:"data,omitempty"`
+	Type                 ConfigTypeCode   `protobuf:"varint,4,opt,name=Type,proto3,enum=grpc.ConfigTypeCode" json:"type,omitempty"`
+	Hash                 string           `protobuf:"bytes,5,opt,name=Hash,proto3" json:"hash,omitempty"`
+	Detail               string           `protobuf:"bytes,6,opt,name=Detail,proto3" json:"detail,omitempty"`
+	XXX_NoUnkeyedLiteral struct{}         `json:"-"`
+	XXX_unrecognized     []byte           `json:"-"`
+	XXX_sizecache        int32            `json:"-"`
+}
+
+func (m *ConfigDetail) Reset()         { *m = ConfigDetail{} }
+func (m *ConfigDetail) String() string { return proto.CompactTextString(m) }
+func (*ConfigDetail) ProtoMessage()    {}
+func (*ConfigDetail) Descriptor() ([]byte, []int) {
+	return fileDescriptor_bedfbfc9b54e5600, []int{17}
+}
+func (m *ConfigDetail) XXX_Unmarshal(b []byte) error {
+	return m.Unmarshal(b)
+}
+func (m *ConfigDetail) XXX_Marshal(b []byte, deterministic bool) ([]byte, error) {
+	if deterministic {
+		return xxx_messageInfo_ConfigDetail.Marshal(b, m, deterministic)
+	} else {
+		b = b[:cap(b)]
+		n, err := m.MarshalToSizedBuffer(b)
+		if err != nil {
+			return nil, err
+		}
+		return b[:n], nil
+	}
+}
+func (m *ConfigDetail) XXX_Merge(src proto.Message) {
+	xxx_messageInfo_ConfigDetail.Merge(m, src)
+}
+func (m *ConfigDetail) XXX_Size() int {
+	return m.Size()
+}
+func (m *ConfigDetail) XXX_DiscardUnknown() {
+	xxx_messageInfo_ConfigDetail.DiscardUnknown(m)
+}
+
+var xxx_messageInfo_ConfigDetail proto.InternalMessageInfo
+
+func (m *ConfigDetail) GetPath() string {
+	if m != nil {
+		return m.Path
+	}
+	return ""
+}
+
+func (m *ConfigDetail) GetStatus() ConfigStatusCode {
+	if m != nil {
+		return m.Status
+	}
+	return ConfigStatusCode_SUCCESS
+}
+
+func (m *ConfigDetail) GetData() string {
+	if m != nil {
+		return m.Data
+	}
+	return ""
+}
+
+func (m *ConfigDetail) GetType() ConfigTypeCode {
+	if m != nil {
+		return m.Type
+	}
+	return ConfigTypeCode_File
+}
+
+func (m *ConfigDetail) GetHash() string {
+	if m != nil {
+		return m.Hash
+	}
+	return ""
+}
+
+func (m *ConfigDetail) GetDetail() string {
+	if m != nil {
+		return m.Detail
+	}
+	return ""
+}
+
 func init() {
+	proto.RegisterEnum("grpc.ConfigStatusCode", ConfigStatusCode_name, ConfigStatusCode_value)
+	proto.RegisterEnum("grpc.ConfigTypeCode", ConfigTypeCode_name, ConfigTypeCode_value)
+	proto.RegisterEnum("grpc.ConfigFPStatusCode", ConfigFPStatusCode_name, ConfigFPStatusCode_value)
 	proto.RegisterEnum("grpc.UploadResponse_StatusCode", UploadResponse_StatusCode_name, UploadResponse_StatusCode_value)
 	proto.RegisterType((*RawData)(nil), "grpc.RawData")
 	proto.RegisterType((*Record)(nil), "grpc.Record")
 	proto.RegisterType((*Item)(nil), "grpc.Item")
 	proto.RegisterMapType((map[string]string)(nil), "grpc.Item.FieldsEntry")
+	proto.RegisterType((*Field)(nil), "grpc.Field")
+	proto.RegisterType((*ItemArray)(nil), "grpc.ItemArray")
 	proto.RegisterType((*Command)(nil), "grpc.Command")
 	proto.RegisterType((*PluginTask)(nil), "grpc.PluginTask")
 	proto.RegisterType((*ConfigItem)(nil), "grpc.ConfigItem")
@@ -946,63 +1599,96 @@ func init() {
 	proto.RegisterType((*MQRawData)(nil), "grpc.MQRawData")
 	proto.RegisterType((*UploadRequest)(nil), "grpc.UploadRequest")
 	proto.RegisterType((*UploadResponse)(nil), "grpc.UploadResponse")
+	proto.RegisterType((*DownloadRequest)(nil), "grpc.DownloadRequest")
+	proto.RegisterType((*DownloadResponse)(nil), "grpc.DownloadResponse")
+	proto.RegisterType((*ConfigRefreshRequest)(nil), "grpc.ConfigRefreshRequest")
+	proto.RegisterType((*ConfigFingerPrint)(nil), "grpc.ConfigFingerPrint")
+	proto.RegisterType((*ConfigRefreshResponse)(nil), "grpc.ConfigRefreshResponse")
+	proto.RegisterType((*ConfigDetail)(nil), "grpc.ConfigDetail")
 }
 
 func init() { proto.RegisterFile("grpc.proto", fileDescriptor_bedfbfc9b54e5600) }
 
 var fileDescriptor_bedfbfc9b54e5600 = []byte{
-	// 808 bytes of a gzipped FileDescriptorProto
-	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xec, 0x56, 0x4f, 0x6f, 0xda, 0x4a,
-	0x10, 0xcf, 0x62, 0x63, 0x60, 0x80, 0x3c, 0xb4, 0x2f, 0x8a, 0x2c, 0xf4, 0xc4, 0x43, 0xd6, 0x7b,
-	0x92, 0x4f, 0xe8, 0x89, 0xd7, 0xd0, 0x26, 0xa7, 0x26, 0x40, 0x14, 0xa4, 0xa4, 0x22, 0x36, 0xc9,
-	0xa1, 0xb7, 0x6d, 0xd8, 0xb8, 0x56, 0xc0, 0x26, 0xf6, 0x92, 0x84, 0x6f, 0xd2, 0x2f, 0xd0, 0x7b,
-	0x3f, 0x41, 0xa5, 0xde, 0x7a, 0xec, 0x47, 0xa8, 0xd2, 0x2f, 0x52, 0xed, 0x1f, 0xb0, 0x09, 0x09,
-	0x95, 0xaa, 0x1e, 0x7b, 0x62, 0xe6, 0x37, 0xb3, 0xb3, 0xb3, 0x33, 0xf3, 0x1b, 0x0c, 0xe0, 0x45,
-	0x93, 0x8b, 0xc6, 0x24, 0x0a, 0x59, 0x88, 0x75, 0x2e, 0x5b, 0xef, 0x33, 0x90, 0x73, 0xc8, 0x6d,
-	0x87, 0x30, 0x82, 0xeb, 0xa0, 0xf3, 0x5f, 0x13, 0xd5, 0x35, 0xbb, 0xd8, 0x2c, 0x35, 0x84, 0xb3,
-	0x43, 0x2f, 0xc2, 0x68, 0xe8, 0x08, 0x0b, 0x36, 0x21, 0xb7, 0xef, 0xd1, 0x80, 0xf5, 0x3a, 0x66,
-	0xa6, 0x8e, 0xec, 0x82, 0x33, 0x57, 0xb1, 0x05, 0xa5, 0x5e, 0xc0, 0x22, 0x12, 0x50, 0xd6, 0xeb,
-	0xdf, 0x3c, 0x33, 0xb5, 0xba, 0x66, 0x17, 0x9c, 0x25, 0x8c, 0xfb, 0x74, 0xef, 0x52, 0x3e, 0xba,
-	0xf4, 0x49, 0x63, 0x0f, 0xe2, 0xb4, 0xcc, 0xec, 0x4a, 0x9c, 0xd6, 0x83, 0x38, 0x2d, 0xd3, 0x58,
-	0x89, 0xd3, 0xc2, 0x55, 0xc8, 0x1f, 0x85, 0x31, 0x0b, 0xc8, 0x98, 0x9a, 0x39, 0x91, 0xea, 0x42,
-	0xe7, 0xaf, 0x38, 0xa7, 0x51, 0xec, 0x87, 0x81, 0x99, 0x97, 0xaf, 0x50, 0x2a, 0xb7, 0xf4, 0xa3,
-	0x70, 0x38, 0xbd, 0x60, 0x66, 0x41, 0x5a, 0x94, 0x6a, 0x9d, 0x83, 0x21, 0x2b, 0xc1, 0x23, 0xf3,
-	0x5a, 0x0c, 0x66, 0x13, 0x6a, 0xa2, 0x3a, 0xb2, 0xb3, 0xce, 0x42, 0xc7, 0x7f, 0x41, 0x61, 0xe0,
-	0x8f, 0x69, 0xcc, 0xc8, 0x78, 0x22, 0x2a, 0xa4, 0x39, 0x09, 0x80, 0x31, 0xe8, 0x07, 0xe1, 0x70,
-	0x66, 0x6a, 0x75, 0x64, 0x97, 0x1c, 0x21, 0x5b, 0xd7, 0xa0, 0xf7, 0x18, 0x1d, 0xe3, 0x06, 0x18,
-	0x87, 0x3e, 0x1d, 0x0d, 0x63, 0x55, 0xfd, 0x6d, 0x59, 0x7d, 0x6e, 0x6b, 0x48, 0x43, 0x37, 0x60,
-	0xd1, 0xcc, 0x51, 0x5e, 0xd5, 0x5d, 0x28, 0xa6, 0x60, 0x5c, 0x01, 0xed, 0x8a, 0xce, 0x44, 0x3e,
-	0x05, 0x87, 0x8b, 0x78, 0x0b, 0xb2, 0x37, 0x64, 0x34, 0xa5, 0xaa, 0x51, 0x52, 0xd9, 0xcb, 0xbc,
-	0x40, 0xd6, 0x2d, 0xe4, 0xda, 0xe1, 0x78, 0x4c, 0x82, 0x21, 0xcf, 0x57, 0x34, 0xb0, 0xcd, 0xa2,
-	0x91, 0x7a, 0x4c, 0x02, 0xe0, 0x7f, 0x40, 0x1f, 0x90, 0xf8, 0x4a, 0x44, 0x28, 0x36, 0x2b, 0x32,
-	0xa3, 0xfe, 0x68, 0xea, 0xf9, 0x01, 0xc7, 0x1d, 0x61, 0xc5, 0x36, 0x18, 0xed, 0x30, 0xb8, 0xf4,
-	0x3d, 0xd1, 0xf3, 0x85, 0x9f, 0xc4, 0x78, 0xfe, 0x8e, 0xb2, 0x5b, 0x97, 0x00, 0xc9, 0xe9, 0xb5,
-	0x75, 0xc4, 0xa0, 0xbf, 0xe2, 0x9d, 0x93, 0xb9, 0x0b, 0x99, 0x63, 0x62, 0x3a, 0x35, 0x89, 0x89,
-	0x79, 0xdc, 0x82, 0xec, 0x20, 0xbc, 0xa2, 0x81, 0xa9, 0xcb, 0x47, 0x0a, 0xc5, 0xfa, 0x88, 0x00,
-	0x92, 0xeb, 0x17, 0xc1, 0xd0, 0x72, 0x30, 0x71, 0xb1, 0xba, 0x40, 0x5c, 0x9a, 0x1a, 0x0b, 0x6d,
-	0x79, 0x2c, 0xb6, 0xc1, 0x70, 0x8f, 0xf6, 0x9b, 0x3b, 0x2d, 0x75, 0x8f, 0xd2, 0x78, 0xf9, 0x5c,
-	0xdf, 0x0b, 0x08, 0x9b, 0x46, 0xd4, 0xcc, 0x0a, 0x53, 0x02, 0xe0, 0x3a, 0x14, 0x3b, 0xe1, 0x6d,
-	0x30, 0x0a, 0xc9, 0xf0, 0xcc, 0x39, 0x56, 0x53, 0x9a, 0x86, 0x78, 0xdc, 0x0e, 0x65, 0xc4, 0x1f,
-	0xa9, 0x11, 0x55, 0x9a, 0xf5, 0x41, 0x03, 0xe3, 0xe4, 0x54, 0xbc, 0xf0, 0x07, 0xd3, 0x26, 0x9a,
-	0xc5, 0x27, 0x6c, 0x3e, 0x6d, 0x0b, 0xe0, 0xb1, 0x69, 0x4b, 0xf3, 0x57, 0x5f, 0xcf, 0x5f, 0xf9,
-	0x9a, 0xf5, 0xfc, 0x35, 0xa4, 0xcf, 0x5a, 0xfe, 0xe6, 0x56, 0xe2, 0xac, 0xf2, 0x37, 0xbf, 0x12,
-	0x67, 0x99, 0xbf, 0x85, 0xa7, 0xf9, 0x0b, 0x4f, 0xf2, 0xb7, 0xb8, 0xc4, 0x5f, 0x6e, 0x71, 0x6f,
-	0x22, 0x51, 0xa9, 0x92, 0xa8, 0xd4, 0x5c, 0x15, 0x67, 0xdc, 0x13, 0x31, 0x21, 0x65, 0x75, 0x46,
-	0xaa, 0xca, 0xd2, 0x27, 0xec, 0xad, 0xb9, 0xb9, 0xb0, 0x70, 0x95, 0xd3, 0x6d, 0x40, 0x3c, 0xf3,
-	0x0f, 0x49, 0xb7, 0x01, 0xf1, 0xac, 0x4f, 0x1a, 0x14, 0x4e, 0x4e, 0xe7, 0x9b, 0xf4, 0xe7, 0xbb,
-	0x56, 0x4b, 0x75, 0xad, 0xd8, 0x84, 0x64, 0x0b, 0xfc, 0xee, 0xe0, 0x2f, 0xed, 0x20, 0x5f, 0x00,
-	0xc4, 0x8b, 0x55, 0x0b, 0x85, 0x6c, 0xed, 0x42, 0xf9, 0x6c, 0xc2, 0xb9, 0xe9, 0xd0, 0xeb, 0x29,
-	0x8d, 0x59, 0xb2, 0x5e, 0x50, 0x6a, 0xbd, 0x2c, 0x16, 0x51, 0x46, 0x12, 0x8b, 0xcb, 0xd6, 0x04,
-	0x36, 0xe7, 0x47, 0xe3, 0x49, 0x18, 0xc4, 0x14, 0x3f, 0x07, 0xc3, 0x65, 0x84, 0x4d, 0x63, 0x71,
-	0x78, 0xb3, 0xf9, 0xb7, 0x6c, 0xe5, 0xb2, 0x57, 0x43, 0xba, 0xb4, 0xc3, 0x21, 0x75, 0x94, 0xbb,
-	0xf5, 0x2f, 0x40, 0x82, 0xe2, 0x22, 0xe4, 0xdc, 0xb3, 0x76, 0xbb, 0xeb, 0xba, 0x95, 0x0d, 0x0c,
-	0x60, 0x1c, 0xee, 0xf7, 0x8e, 0xbb, 0x9d, 0x0a, 0x6a, 0xee, 0x41, 0x7e, 0x10, 0x91, 0x20, 0xbe,
-	0xa4, 0x11, 0x6e, 0xa4, 0xe4, 0xb2, 0xfa, 0xdb, 0x96, 0x93, 0x58, 0x2d, 0xcf, 0xb7, 0xb1, 0x58,
-	0xf8, 0xd6, 0x86, 0x8d, 0xfe, 0x43, 0xcd, 0x97, 0x90, 0x3b, 0xf4, 0x47, 0xb4, 0x7b, 0xc7, 0xf0,
-	0x0e, 0x18, 0x32, 0x25, 0xfc, 0xe7, 0x72, 0x82, 0xa2, 0x02, 0xd5, 0xad, 0xc7, 0xb2, 0xb6, 0xd1,
-	0xc1, 0xf6, 0xe7, 0xfb, 0x1a, 0xfa, 0x72, 0x5f, 0x43, 0x5f, 0xef, 0x6b, 0xe8, 0xdd, 0xb7, 0xda,
-	0xc6, 0x6b, 0xf1, 0x39, 0xf1, 0xc6, 0x10, 0xdf, 0x16, 0xff, 0x7f, 0x0f, 0x00, 0x00, 0xff, 0xff,
-	0xa7, 0xd1, 0xd4, 0xea, 0x69, 0x08, 0x00, 0x00,
+	// 1245 bytes of a gzipped FileDescriptorProto
+	0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xec, 0x57, 0xcd, 0x6e, 0x22, 0xc7,
+	0x13, 0x77, 0xc3, 0x30, 0x40, 0xe1, 0x0f, 0xb6, 0xd7, 0xeb, 0xff, 0x88, 0x7f, 0x44, 0xd0, 0xe4,
+	0x0b, 0x39, 0x12, 0xb1, 0xd8, 0xac, 0x93, 0xdd, 0x9c, 0xbc, 0x18, 0xcb, 0x28, 0xbb, 0x2b, 0x76,
+	0x60, 0x73, 0xc8, 0x6d, 0x02, 0x6d, 0x8c, 0x0c, 0x33, 0xec, 0x4c, 0x63, 0x9b, 0x48, 0x79, 0x82,
+	0xbc, 0x40, 0x5e, 0x20, 0xd7, 0x3c, 0x41, 0x94, 0x73, 0x4e, 0x51, 0x1e, 0x21, 0x72, 0x94, 0xf7,
+	0x88, 0xba, 0xba, 0x87, 0xe9, 0x61, 0xb0, 0xb3, 0xc9, 0x29, 0x87, 0x9c, 0xe8, 0xfa, 0xe8, 0x9a,
+	0x5f, 0x57, 0x55, 0xff, 0xaa, 0x01, 0x18, 0x05, 0xb3, 0x41, 0x63, 0x16, 0xf8, 0xdc, 0xa7, 0x86,
+	0x58, 0xdb, 0xdf, 0x67, 0x20, 0xef, 0xb8, 0x57, 0xc7, 0x2e, 0x77, 0x69, 0x0d, 0x0c, 0xf1, 0x6b,
+	0x91, 0x5a, 0xb6, 0x5e, 0x6a, 0x6e, 0x36, 0xd0, 0xd9, 0x61, 0x03, 0x3f, 0x18, 0x3a, 0x68, 0xa1,
+	0x16, 0xe4, 0x8f, 0x46, 0xcc, 0xe3, 0x9d, 0x63, 0x2b, 0x53, 0x23, 0xf5, 0xa2, 0x13, 0x89, 0xd4,
+	0x86, 0xcd, 0x8e, 0xc7, 0x03, 0xd7, 0x63, 0xbc, 0xd3, 0xbd, 0xfc, 0xd8, 0xca, 0xd6, 0xb2, 0xf5,
+	0xa2, 0x93, 0xd0, 0x09, 0x9f, 0xf6, 0xb5, 0xe6, 0x63, 0x48, 0x1f, 0x5d, 0xb7, 0x12, 0xe7, 0xd0,
+	0xca, 0xa5, 0xe2, 0x1c, 0xae, 0xc4, 0x39, 0xb4, 0xcc, 0x54, 0x9c, 0x43, 0x5a, 0x81, 0xc2, 0xa9,
+	0x1f, 0x72, 0xcf, 0x9d, 0x32, 0x2b, 0x8f, 0x50, 0x97, 0xb2, 0x38, 0xc5, 0x17, 0x2c, 0x08, 0xc7,
+	0xbe, 0x67, 0x15, 0xe4, 0x29, 0x94, 0x28, 0x2c, 0xdd, 0xc0, 0x1f, 0xce, 0x07, 0xdc, 0x2a, 0x4a,
+	0x8b, 0x12, 0xed, 0xaf, 0xc1, 0x94, 0x99, 0x10, 0x91, 0x45, 0x2e, 0xfa, 0x8b, 0x19, 0xb3, 0x48,
+	0x8d, 0xd4, 0x73, 0xce, 0x52, 0xa6, 0x6f, 0x41, 0xb1, 0x3f, 0x9e, 0xb2, 0x90, 0xbb, 0xd3, 0x19,
+	0x66, 0x28, 0xeb, 0xc4, 0x0a, 0x4a, 0xc1, 0x78, 0xea, 0x0f, 0x17, 0x56, 0xb6, 0x46, 0xea, 0x9b,
+	0x0e, 0xae, 0xc5, 0x59, 0x8e, 0x66, 0x33, 0xe6, 0x0d, 0xd9, 0x10, 0x6d, 0x06, 0xda, 0x12, 0x3a,
+	0xfb, 0x35, 0x18, 0x1d, 0xce, 0xa6, 0xb4, 0x01, 0xe6, 0xc9, 0x98, 0x4d, 0x86, 0xa1, 0xaa, 0xd0,
+	0x9e, 0xac, 0x90, 0xb0, 0x35, 0xa4, 0xa1, 0xed, 0xf1, 0x60, 0xe1, 0x28, 0xaf, 0xca, 0x63, 0x28,
+	0x69, 0x6a, 0x5a, 0x86, 0xec, 0x05, 0x5b, 0x20, 0xe6, 0xa2, 0x23, 0x96, 0x74, 0x17, 0x72, 0x97,
+	0xee, 0x64, 0xce, 0x54, 0x31, 0xa5, 0xf0, 0x24, 0xf3, 0x29, 0xb1, 0x3f, 0x82, 0x1c, 0x6e, 0x7d,
+	0xd3, 0x4d, 0xf6, 0x01, 0x14, 0x05, 0x8e, 0xa3, 0x20, 0x70, 0x17, 0xf4, 0x1d, 0x30, 0xcf, 0x74,
+	0xa0, 0x25, 0x09, 0x14, 0x23, 0x3a, 0xca, 0x64, 0x5f, 0x41, 0xbe, 0xe5, 0x4f, 0xa7, 0xae, 0x37,
+	0x14, 0x69, 0xc3, 0x3e, 0x6a, 0xf1, 0x60, 0xa2, 0x72, 0x1a, 0x2b, 0xe8, 0xbb, 0x60, 0xf4, 0xdd,
+	0xf0, 0x02, 0xbf, 0x57, 0x6a, 0x96, 0x65, 0xac, 0xee, 0x64, 0x3e, 0x1a, 0x7b, 0x42, 0xef, 0xa0,
+	0x95, 0xd6, 0xc1, 0x6c, 0xf9, 0xde, 0xd9, 0x78, 0x84, 0xad, 0xb7, 0xf4, 0x93, 0x3a, 0x01, 0xcd,
+	0x51, 0x76, 0xfb, 0x0c, 0x20, 0xde, 0x7d, 0x67, 0x39, 0x29, 0x18, 0x2f, 0x44, 0x03, 0xc9, 0x93,
+	0xe2, 0x5a, 0xe8, 0xf0, 0x92, 0x64, 0xa5, 0x0e, 0xaf, 0xc5, 0x2e, 0xe4, 0xfa, 0xfe, 0x05, 0xf3,
+	0xb0, 0x7a, 0x45, 0x47, 0x0a, 0xf6, 0x4f, 0x04, 0x20, 0xfe, 0xfc, 0x32, 0x18, 0x49, 0x06, 0xc3,
+	0x0f, 0xab, 0x0f, 0xe0, 0x47, 0xb5, 0xee, 0xcc, 0x26, 0xbb, 0x73, 0x0f, 0xcc, 0xde, 0xe9, 0x51,
+	0xf3, 0xd1, 0xa1, 0xfa, 0x8e, 0x92, 0x44, 0xfa, 0x7a, 0xe3, 0x91, 0xe7, 0xf2, 0x79, 0xc0, 0xac,
+	0x1c, 0x9a, 0x62, 0x05, 0xad, 0x41, 0xe9, 0xd8, 0xbf, 0xf2, 0x26, 0xbe, 0x3b, 0x7c, 0xe5, 0x3c,
+	0x53, 0x97, 0x45, 0x57, 0x89, 0xb8, 0xc7, 0x8c, 0xbb, 0xe3, 0x89, 0xba, 0x29, 0x4a, 0xb2, 0x7f,
+	0x30, 0xc0, 0x7c, 0xfe, 0x12, 0x4f, 0xf8, 0x17, 0x4d, 0x8f, 0xc5, 0x12, 0x8d, 0x1e, 0x35, 0xfd,
+	0x52, 0xb1, 0xb6, 0xe9, 0x35, 0x1a, 0x31, 0xee, 0xa6, 0x11, 0x79, 0x9a, 0xbb, 0x69, 0xc4, 0x94,
+	0x3e, 0x77, 0xd2, 0x48, 0x3e, 0x15, 0x27, 0x4d, 0x23, 0x85, 0x54, 0x9c, 0x24, 0x8d, 0x14, 0x6f,
+	0xa7, 0x11, 0xb8, 0x95, 0x46, 0x4a, 0x09, 0x1a, 0x11, 0x96, 0xde, 0x65, 0x80, 0x99, 0xda, 0xc4,
+	0x4c, 0x45, 0x22, 0xee, 0xe9, 0x3d, 0xc7, 0x0e, 0xd9, 0x52, 0x7b, 0xa4, 0xa8, 0x2c, 0x5d, 0x97,
+	0x9f, 0x5b, 0xdb, 0x4b, 0x8b, 0x10, 0xc5, 0xe5, 0xec, 0xbb, 0x23, 0x6b, 0x47, 0x5e, 0xce, 0xbe,
+	0x3b, 0x12, 0x78, 0xdb, 0xde, 0xb9, 0xeb, 0x0d, 0xd8, 0xd0, 0x2a, 0x4b, 0xbc, 0x91, 0x4c, 0xab,
+	0x00, 0x9d, 0xf0, 0xd4, 0xf7, 0xd8, 0x62, 0xe6, 0x73, 0xeb, 0x1e, 0x5a, 0x35, 0x4d, 0x8a, 0x8a,
+	0x68, 0x9a, 0x8a, 0xb0, 0xd6, 0x83, 0x81, 0x3f, 0xc7, 0xda, 0xdd, 0x97, 0xad, 0xb6, 0x54, 0xd8,
+	0xbf, 0x18, 0x50, 0x7c, 0xfe, 0x32, 0x1a, 0x27, 0xff, 0xbc, 0x67, 0xaa, 0x5a, 0xcf, 0x94, 0x9a,
+	0x10, 0xd3, 0xdc, 0x7f, 0xfd, 0xf3, 0x2f, 0xee, 0x9f, 0x87, 0x6b, 0xfa, 0xa7, 0xd4, 0xdc, 0x89,
+	0xab, 0x87, 0xc3, 0xe1, 0x6f, 0x35, 0xd4, 0x63, 0xd8, 0x7a, 0x35, 0x13, 0x34, 0xe5, 0xb0, 0xd7,
+	0x73, 0x16, 0xf2, 0x98, 0x69, 0x89, 0xc6, 0xb4, 0x4b, 0x4e, 0xce, 0x48, 0x8e, 0x11, 0x6b, 0x7b,
+	0x06, 0xdb, 0xd1, 0xd6, 0x70, 0xe6, 0x7b, 0x21, 0xa3, 0x9f, 0x80, 0xd9, 0xe3, 0x2e, 0x9f, 0x87,
+	0xb8, 0x79, 0xbb, 0xf9, 0xb6, 0x44, 0x96, 0xf4, 0x6a, 0x48, 0x97, 0x96, 0x3f, 0x64, 0x8e, 0x72,
+	0xb7, 0xdf, 0x03, 0x88, 0xb5, 0xb4, 0x04, 0xf9, 0xde, 0xab, 0x56, 0xab, 0xdd, 0xeb, 0x95, 0x37,
+	0x28, 0x80, 0x79, 0x72, 0xd4, 0x79, 0xd6, 0x3e, 0x2e, 0x13, 0xfb, 0x03, 0xd8, 0x89, 0x58, 0x55,
+	0x83, 0xcb, 0x75, 0xb8, 0x28, 0xd8, 0xef, 0x43, 0x39, 0x76, 0x54, 0xe0, 0x28, 0x18, 0x43, 0xf9,
+	0xf6, 0xc2, 0x23, 0x88, 0xb5, 0xfd, 0x2d, 0x81, 0x5d, 0x39, 0x40, 0x1c, 0x76, 0x16, 0xb0, 0xf0,
+	0x3c, 0x0a, 0xab, 0xf5, 0x3f, 0x49, 0xf6, 0x7f, 0x35, 0x9a, 0x6d, 0xda, 0xdc, 0xd2, 0x34, 0x14,
+	0x9f, 0x04, 0xde, 0x88, 0x05, 0xb3, 0x60, 0xec, 0x71, 0x35, 0x2a, 0xff, 0xa7, 0x8f, 0x4a, 0x69,
+	0xee, 0x0a, 0xb3, 0xa3, 0xfb, 0xda, 0x53, 0xb8, 0x97, 0xf2, 0x10, 0xb0, 0xb1, 0xb1, 0xd4, 0x50,
+	0xc3, 0xae, 0xa2, 0x60, 0x9c, 0xba, 0xe1, 0x79, 0x34, 0xd4, 0xc4, 0x9a, 0x1e, 0x2c, 0x73, 0x9f,
+	0xc5, 0xdc, 0x5b, 0x89, 0x4f, 0x76, 0xd7, 0x24, 0xfd, 0x0f, 0x02, 0x0f, 0x56, 0x0e, 0xaf, 0x52,
+	0x95, 0x3c, 0x23, 0x49, 0x9d, 0x51, 0x8c, 0x43, 0x36, 0x08, 0x18, 0xff, 0x9c, 0x2d, 0x14, 0x88,
+	0x58, 0x71, 0xc7, 0x78, 0xb5, 0x20, 0xef, 0xb0, 0x09, 0x73, 0x43, 0x86, 0xac, 0x62, 0x38, 0x91,
+	0x28, 0x1e, 0x5e, 0x0a, 0x7d, 0x0e, 0xd1, 0xef, 0xe9, 0xe8, 0xd3, 0xd8, 0xe9, 0xfe, 0xf2, 0x2d,
+	0x62, 0x62, 0x82, 0xa9, 0xee, 0x2f, 0x87, 0xeb, 0xf2, 0x35, 0xf2, 0x23, 0x81, 0x4d, 0xdd, 0xb0,
+	0x36, 0xa5, 0x31, 0x80, 0xcc, 0x1b, 0x01, 0x58, 0xf7, 0x48, 0xa9, 0xab, 0xb7, 0x86, 0x81, 0x11,
+	0x76, 0xf5, 0x08, 0x42, 0x8f, 0xfb, 0x8d, 0xe8, 0xd9, 0x83, 0x05, 0xcc, 0x69, 0x05, 0x8c, 0xdf,
+	0x08, 0xa6, 0xfe, 0x46, 0xd8, 0xff, 0x10, 0xca, 0xab, 0x28, 0x6e, 0xbd, 0x21, 0xfb, 0x4d, 0xd8,
+	0x4e, 0x7e, 0x90, 0x16, 0xc0, 0x38, 0x19, 0x4f, 0x98, 0xf4, 0x93, 0xb6, 0x32, 0x11, 0x6b, 0x87,
+	0x4d, 0xfd, 0x4b, 0x56, 0xce, 0xec, 0x1f, 0x00, 0x4d, 0x77, 0x09, 0x2d, 0x42, 0xae, 0x7d, 0x3d,
+	0x0e, 0x79, 0x79, 0x83, 0xee, 0x40, 0xe9, 0x85, 0xef, 0x31, 0x21, 0x31, 0x8f, 0x97, 0x49, 0xf3,
+	0x09, 0x14, 0xfa, 0x81, 0xeb, 0x85, 0x67, 0x2c, 0xa0, 0x0d, 0x6d, 0xbd, 0xa5, 0xfe, 0xd0, 0xc8,
+	0xf1, 0x54, 0xd9, 0x8a, 0x32, 0x80, 0x6f, 0x50, 0x7b, 0xa3, 0x4e, 0x0e, 0x48, 0xf3, 0x1b, 0xc8,
+	0x0b, 0x3c, 0xed, 0x6b, 0x4e, 0x1f, 0x81, 0x29, 0xa9, 0x81, 0xde, 0x4f, 0x12, 0x05, 0xde, 0xc1,
+	0xca, 0xee, 0x3a, 0xf6, 0xa8, 0x13, 0xfa, 0x19, 0x14, 0xa2, 0xcb, 0x4d, 0x1f, 0x48, 0x9f, 0x15,
+	0x56, 0xa8, 0xec, 0xad, 0xaa, 0xe5, 0xe6, 0x03, 0xd2, 0xec, 0x41, 0x51, 0x1e, 0x56, 0x00, 0x38,
+	0x81, 0x52, 0xeb, 0x9c, 0x0d, 0x2e, 0xa4, 0x86, 0x56, 0xf4, 0x8a, 0x25, 0x09, 0xa1, 0xf2, 0xff,
+	0xb5, 0x36, 0x19, 0xf6, 0xe9, 0xde, 0xcf, 0x37, 0x55, 0xf2, 0xeb, 0x4d, 0x95, 0xfc, 0x76, 0x53,
+	0x25, 0xdf, 0xfd, 0x5e, 0xdd, 0xf8, 0x12, 0xff, 0xfa, 0x7d, 0x65, 0xe2, 0xff, 0xc0, 0x87, 0x7f,
+	0x06, 0x00, 0x00, 0xff, 0xff, 0xb3, 0xcc, 0xbe, 0x14, 0x15, 0x0e, 0x00, 0x00,
 }
 
 // Reference imports to suppress errors if they are not otherwise used.
@@ -1122,6 +1808,7 @@ var _Transfer_serviceDesc = grpc.ServiceDesc{
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
 type FileExtClient interface {
 	Upload(ctx context.Context, opts ...grpc.CallOption) (FileExt_UploadClient, error)
+	Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (FileExt_DownloadClient, error)
 }
 
 type fileExtClient struct {
@@ -1166,9 +1853,42 @@ func (x *fileExtUploadClient) CloseAndRecv() (*UploadResponse, error) {
 	return m, nil
 }
 
+func (c *fileExtClient) Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (FileExt_DownloadClient, error) {
+	stream, err := c.cc.NewStream(ctx, &_FileExt_serviceDesc.Streams[1], "/grpc.FileExt/Download", opts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &fileExtDownloadClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type FileExt_DownloadClient interface {
+	Recv() (*DownloadResponse, error)
+	grpc.ClientStream
+}
+
+type fileExtDownloadClient struct {
+	grpc.ClientStream
+}
+
+func (x *fileExtDownloadClient) Recv() (*DownloadResponse, error) {
+	m := new(DownloadResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // FileExtServer is the server API for FileExt service.
 type FileExtServer interface {
 	Upload(FileExt_UploadServer) error
+	Download(*DownloadRequest, FileExt_DownloadServer) error
 }
 
 // UnimplementedFileExtServer can be embedded to have forward compatible implementations.
@@ -1177,6 +1897,9 @@ type UnimplementedFileExtServer struct {
 
 func (*UnimplementedFileExtServer) Upload(srv FileExt_UploadServer) error {
 	return status.Errorf(codes.Unimplemented, "method Upload not implemented")
+}
+func (*UnimplementedFileExtServer) Download(req *DownloadRequest, srv FileExt_DownloadServer) error {
+	return status.Errorf(codes.Unimplemented, "method Download not implemented")
 }
 
 func RegisterFileExtServer(s *grpc.Server, srv FileExtServer) {
@@ -1209,6 +1932,27 @@ func (x *fileExtUploadServer) Recv() (*UploadRequest, error) {
 	return m, nil
 }
 
+func _FileExt_Download_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DownloadRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(FileExtServer).Download(m, &fileExtDownloadServer{stream})
+}
+
+type FileExt_DownloadServer interface {
+	Send(*DownloadResponse) error
+	grpc.ServerStream
+}
+
+type fileExtDownloadServer struct {
+	grpc.ServerStream
+}
+
+func (x *fileExtDownloadServer) Send(m *DownloadResponse) error {
+	return x.ServerStream.SendMsg(m)
+}
+
 var _FileExt_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "grpc.FileExt",
 	HandlerType: (*FileExtServer)(nil),
@@ -1219,7 +1963,84 @@ var _FileExt_serviceDesc = grpc.ServiceDesc{
 			Handler:       _FileExt_Upload_Handler,
 			ClientStreams: true,
 		},
+		{
+			StreamName:    "Download",
+			Handler:       _FileExt_Download_Handler,
+			ServerStreams: true,
+		},
 	},
+	Metadata: "grpc.proto",
+}
+
+// ConfigExtClient is the client API for ConfigExt service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://godoc.org/google.golang.org/grpc#ClientConn.NewStream.
+type ConfigExtClient interface {
+	CheckConfig(ctx context.Context, in *ConfigRefreshRequest, opts ...grpc.CallOption) (*ConfigRefreshResponse, error)
+}
+
+type configExtClient struct {
+	cc *grpc.ClientConn
+}
+
+func NewConfigExtClient(cc *grpc.ClientConn) ConfigExtClient {
+	return &configExtClient{cc}
+}
+
+func (c *configExtClient) CheckConfig(ctx context.Context, in *ConfigRefreshRequest, opts ...grpc.CallOption) (*ConfigRefreshResponse, error) {
+	out := new(ConfigRefreshResponse)
+	err := c.cc.Invoke(ctx, "/grpc.ConfigExt/CheckConfig", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ConfigExtServer is the server API for ConfigExt service.
+type ConfigExtServer interface {
+	CheckConfig(context.Context, *ConfigRefreshRequest) (*ConfigRefreshResponse, error)
+}
+
+// UnimplementedConfigExtServer can be embedded to have forward compatible implementations.
+type UnimplementedConfigExtServer struct {
+}
+
+func (*UnimplementedConfigExtServer) CheckConfig(ctx context.Context, req *ConfigRefreshRequest) (*ConfigRefreshResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckConfig not implemented")
+}
+
+func RegisterConfigExtServer(s *grpc.Server, srv ConfigExtServer) {
+	s.RegisterService(&_ConfigExt_serviceDesc, srv)
+}
+
+func _ConfigExt_CheckConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfigRefreshRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConfigExtServer).CheckConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/grpc.ConfigExt/CheckConfig",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConfigExtServer).CheckConfig(ctx, req.(*ConfigRefreshRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+var _ConfigExt_serviceDesc = grpc.ServiceDesc{
+	ServiceName: "grpc.ConfigExt",
+	HandlerType: (*ConfigExtServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "CheckConfig",
+			Handler:    _ConfigExt_CheckConfig_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
 	Metadata: "grpc.proto",
 }
 
@@ -1352,6 +2173,13 @@ func (m *Record) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
 	}
+	if len(m.AppendedBody) > 0 {
+		i -= len(m.AppendedBody)
+		copy(dAtA[i:], m.AppendedBody)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.AppendedBody)))
+		i--
+		dAtA[i] = 0x22
+	}
 	if len(m.Body) > 0 {
 		i -= len(m.Body)
 		copy(dAtA[i:], m.Body)
@@ -1411,6 +2239,88 @@ func (m *Item) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 			i--
 			dAtA[i] = 0xa
 			i = encodeVarintGrpc(dAtA, i, uint64(baseI-i))
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *Field) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *Field) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *Field) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Value) > 0 {
+		i -= len(m.Value)
+		copy(dAtA[i:], m.Value)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Value)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.Key) > 0 {
+		i -= len(m.Key)
+		copy(dAtA[i:], m.Key)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Key)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ItemArray) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ItemArray) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ItemArray) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Fields) > 0 {
+		for iNdEx := len(m.Fields) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.Fields[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintGrpc(dAtA, i, uint64(size))
+			}
 			i--
 			dAtA[i] = 0xa
 		}
@@ -1631,6 +2541,42 @@ func (m *MQData) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
 	}
+	if len(m.AccountID) > 0 {
+		i -= len(m.AccountID)
+		copy(dAtA[i:], m.AccountID)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.AccountID)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x9a
+	}
+	if len(m.AppendedBody) > 0 {
+		i -= len(m.AppendedBody)
+		copy(dAtA[i:], m.AppendedBody)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.AppendedBody)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x92
+	}
+	if len(m.IsHoneypot) > 0 {
+		i -= len(m.IsHoneypot)
+		copy(dAtA[i:], m.IsHoneypot)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.IsHoneypot)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x8a
+	}
+	if len(m.Enhanced) > 0 {
+		i -= len(m.Enhanced)
+		copy(dAtA[i:], m.Enhanced)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Enhanced)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x82
+	}
 	if len(m.Tag) > 0 {
 		i -= len(m.Tag)
 		copy(dAtA[i:], m.Tag)
@@ -1757,10 +2703,51 @@ func (m *MQRawData) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 		i -= len(m.XXX_unrecognized)
 		copy(dAtA[i:], m.XXX_unrecognized)
 	}
-	if len(m.Tags) > 0 {
-		i -= len(m.Tags)
-		copy(dAtA[i:], m.Tags)
-		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Tags)))
+	if len(m.AccountID) > 0 {
+		i -= len(m.AccountID)
+		copy(dAtA[i:], m.AccountID)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.AccountID)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x9a
+	}
+	if m.AppendedBody != nil {
+		{
+			size, err := m.AppendedBody.MarshalToSizedBuffer(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = encodeVarintGrpc(dAtA, i, uint64(size))
+		}
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x92
+	}
+	if len(m.IsHoneypot) > 0 {
+		i -= len(m.IsHoneypot)
+		copy(dAtA[i:], m.IsHoneypot)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.IsHoneypot)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x8a
+	}
+	if len(m.Enhanced) > 0 {
+		i -= len(m.Enhanced)
+		copy(dAtA[i:], m.Enhanced)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Enhanced)))
+		i--
+		dAtA[i] = 0x1
+		i--
+		dAtA[i] = 0x82
+	}
+	if len(m.Tag) > 0 {
+		i -= len(m.Tag)
+		copy(dAtA[i:], m.Tag)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Tag)))
 		i--
 		dAtA[i] = 0x7a
 	}
@@ -1937,6 +2924,312 @@ func (m *UploadResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	return len(dAtA) - i, nil
 }
 
+func (m *DownloadRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *DownloadRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *DownloadRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Token) > 0 {
+		i -= len(m.Token)
+		copy(dAtA[i:], m.Token)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Token)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *DownloadResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *DownloadResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *DownloadResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Data) > 0 {
+		i -= len(m.Data)
+		copy(dAtA[i:], m.Data)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Data)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ConfigRefreshRequest) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ConfigRefreshRequest) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ConfigRefreshRequest) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Fingerprint) > 0 {
+		for iNdEx := len(m.Fingerprint) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.Fingerprint[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintGrpc(dAtA, i, uint64(size))
+			}
+			i--
+			dAtA[i] = 0x1a
+		}
+	}
+	if len(m.PluginName) > 0 {
+		i -= len(m.PluginName)
+		copy(dAtA[i:], m.PluginName)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.PluginName)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.AgentID) > 0 {
+		i -= len(m.AgentID)
+		copy(dAtA[i:], m.AgentID)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.AgentID)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ConfigFingerPrint) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ConfigFingerPrint) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ConfigFingerPrint) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if m.Status != 0 {
+		i = encodeVarintGrpc(dAtA, i, uint64(m.Status))
+		i--
+		dAtA[i] = 0x18
+	}
+	if len(m.Hash) > 0 {
+		i -= len(m.Hash)
+		copy(dAtA[i:], m.Hash)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Hash)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.Path) > 0 {
+		i -= len(m.Path)
+		copy(dAtA[i:], m.Path)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Path)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ConfigRefreshResponse) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ConfigRefreshResponse) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ConfigRefreshResponse) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Config) > 0 {
+		for iNdEx := len(m.Config) - 1; iNdEx >= 0; iNdEx-- {
+			{
+				size, err := m.Config[iNdEx].MarshalToSizedBuffer(dAtA[:i])
+				if err != nil {
+					return 0, err
+				}
+				i -= size
+				i = encodeVarintGrpc(dAtA, i, uint64(size))
+			}
+			i--
+			dAtA[i] = 0x32
+		}
+	}
+	if m.Status != 0 {
+		i = encodeVarintGrpc(dAtA, i, uint64(m.Status))
+		i--
+		dAtA[i] = 0x28
+	}
+	if m.Release != 0 {
+		i = encodeVarintGrpc(dAtA, i, uint64(m.Release))
+		i--
+		dAtA[i] = 0x20
+	}
+	if len(m.Version) > 0 {
+		i -= len(m.Version)
+		copy(dAtA[i:], m.Version)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Version)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if len(m.SecretKey) > 0 {
+		i -= len(m.SecretKey)
+		copy(dAtA[i:], m.SecretKey)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.SecretKey)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.PluginName) > 0 {
+		i -= len(m.PluginName)
+		copy(dAtA[i:], m.PluginName)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.PluginName)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ConfigDetail) Marshal() (dAtA []byte, err error) {
+	size := m.Size()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBuffer(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ConfigDetail) MarshalTo(dAtA []byte) (int, error) {
+	size := m.Size()
+	return m.MarshalToSizedBuffer(dAtA[:size])
+}
+
+func (m *ConfigDetail) MarshalToSizedBuffer(dAtA []byte) (int, error) {
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.XXX_unrecognized != nil {
+		i -= len(m.XXX_unrecognized)
+		copy(dAtA[i:], m.XXX_unrecognized)
+	}
+	if len(m.Detail) > 0 {
+		i -= len(m.Detail)
+		copy(dAtA[i:], m.Detail)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Detail)))
+		i--
+		dAtA[i] = 0x32
+	}
+	if len(m.Hash) > 0 {
+		i -= len(m.Hash)
+		copy(dAtA[i:], m.Hash)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Hash)))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if m.Type != 0 {
+		i = encodeVarintGrpc(dAtA, i, uint64(m.Type))
+		i--
+		dAtA[i] = 0x20
+	}
+	if len(m.Data) > 0 {
+		i -= len(m.Data)
+		copy(dAtA[i:], m.Data)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Data)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if m.Status != 0 {
+		i = encodeVarintGrpc(dAtA, i, uint64(m.Status))
+		i--
+		dAtA[i] = 0x10
+	}
+	if len(m.Path) > 0 {
+		i -= len(m.Path)
+		copy(dAtA[i:], m.Path)
+		i = encodeVarintGrpc(dAtA, i, uint64(len(m.Path)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
 func encodeVarintGrpc(dAtA []byte, offset int, v uint64) int {
 	offset -= sovGrpc(v)
 	base := offset
@@ -2022,6 +3315,10 @@ func (m *Record) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovGrpc(uint64(l))
 	}
+	l = len(m.AppendedBody)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
 	}
@@ -2040,6 +3337,44 @@ func (m *Item) Size() (n int) {
 			_ = v
 			mapEntrySize := 1 + len(k) + sovGrpc(uint64(len(k))) + 1 + len(v) + sovGrpc(uint64(len(v)))
 			n += mapEntrySize + 1 + sovGrpc(uint64(mapEntrySize))
+		}
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *Field) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Key)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.Value)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ItemArray) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.Fields) > 0 {
+		for _, e := range m.Fields {
+			l = e.Size()
+			n += 1 + l + sovGrpc(uint64(l))
 		}
 	}
 	if m.XXX_unrecognized != nil {
@@ -2205,6 +3540,22 @@ func (m *MQData) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovGrpc(uint64(l))
 	}
+	l = len(m.Enhanced)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.IsHoneypot)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.AppendedBody)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.AccountID)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
 	}
@@ -2270,9 +3621,25 @@ func (m *MQRawData) Size() (n int) {
 	if l > 0 {
 		n += 1 + l + sovGrpc(uint64(l))
 	}
-	l = len(m.Tags)
+	l = len(m.Tag)
 	if l > 0 {
 		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.Enhanced)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.IsHoneypot)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	if m.AppendedBody != nil {
+		l = m.AppendedBody.Size()
+		n += 2 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.AccountID)
+	if l > 0 {
+		n += 2 + l + sovGrpc(uint64(l))
 	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
@@ -2308,6 +3675,157 @@ func (m *UploadResponse) Size() (n int) {
 	_ = l
 	if m.Status != 0 {
 		n += 1 + sovGrpc(uint64(m.Status))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *DownloadRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Token)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *DownloadResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Data)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ConfigRefreshRequest) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.AgentID)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.PluginName)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if len(m.Fingerprint) > 0 {
+		for _, e := range m.Fingerprint {
+			l = e.Size()
+			n += 1 + l + sovGrpc(uint64(l))
+		}
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ConfigFingerPrint) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Path)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.Hash)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.Status != 0 {
+		n += 1 + sovGrpc(uint64(m.Status))
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ConfigRefreshResponse) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.PluginName)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.SecretKey)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.Version)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.Release != 0 {
+		n += 1 + sovGrpc(uint64(m.Release))
+	}
+	if m.Status != 0 {
+		n += 1 + sovGrpc(uint64(m.Status))
+	}
+	if len(m.Config) > 0 {
+		for _, e := range m.Config {
+			l = e.Size()
+			n += 1 + l + sovGrpc(uint64(l))
+		}
+	}
+	if m.XXX_unrecognized != nil {
+		n += len(m.XXX_unrecognized)
+	}
+	return n
+}
+
+func (m *ConfigDetail) Size() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.Path)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.Status != 0 {
+		n += 1 + sovGrpc(uint64(m.Status))
+	}
+	l = len(m.Data)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	if m.Type != 0 {
+		n += 1 + sovGrpc(uint64(m.Type))
+	}
+	l = len(m.Hash)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
+	}
+	l = len(m.Detail)
+	if l > 0 {
+		n += 1 + l + sovGrpc(uint64(l))
 	}
 	if m.XXX_unrecognized != nil {
 		n += len(m.XXX_unrecognized)
@@ -2763,6 +4281,40 @@ func (m *Record) Unmarshal(dAtA []byte) error {
 				m.Body = []byte{}
 			}
 			iNdEx = postIndex
+		case 4:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppendedBody", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppendedBody = append(m.AppendedBody[:0], dAtA[iNdEx:postIndex]...)
+			if m.AppendedBody == nil {
+				m.AppendedBody = []byte{}
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGrpc(dAtA[iNdEx:])
@@ -2940,6 +4492,206 @@ func (m *Item) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.Fields[mapkey] = mapvalue
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *Field) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: Field: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: Field: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Key", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Key = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Value", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Value = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ItemArray) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ItemArray: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ItemArray: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Fields", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Fields = append(m.Fields, &Field{})
+			if err := m.Fields[len(m.Fields)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
@@ -4016,6 +5768,136 @@ func (m *MQData) Unmarshal(dAtA []byte) error {
 			}
 			m.Tag = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
+		case 16:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Enhanced", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Enhanced = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 17:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field IsHoneypot", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.IsHoneypot = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 18:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppendedBody", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AppendedBody = append(m.AppendedBody[:0], dAtA[iNdEx:postIndex]...)
+			if m.AppendedBody == nil {
+				m.AppendedBody = []byte{}
+			}
+			iNdEx = postIndex
+		case 19:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AccountID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AccountID = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGrpc(dAtA[iNdEx:])
@@ -4482,7 +6364,7 @@ func (m *MQRawData) Unmarshal(dAtA []byte) error {
 			iNdEx = postIndex
 		case 15:
 			if wireType != 2 {
-				return fmt.Errorf("proto: wrong wireType = %d for field Tags", wireType)
+				return fmt.Errorf("proto: wrong wireType = %d for field Tag", wireType)
 			}
 			var stringLen uint64
 			for shift := uint(0); ; shift += 7 {
@@ -4510,7 +6392,139 @@ func (m *MQRawData) Unmarshal(dAtA []byte) error {
 			if postIndex > l {
 				return io.ErrUnexpectedEOF
 			}
-			m.Tags = string(dAtA[iNdEx:postIndex])
+			m.Tag = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 16:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Enhanced", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Enhanced = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 17:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field IsHoneypot", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.IsHoneypot = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 18:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AppendedBody", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.AppendedBody == nil {
+				m.AppendedBody = &ItemArray{}
+			}
+			if err := m.AppendedBody.Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 19:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AccountID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AccountID = string(dAtA[iNdEx:postIndex])
 			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
@@ -4699,6 +6713,893 @@ func (m *UploadResponse) Unmarshal(dAtA []byte) error {
 					break
 				}
 			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *DownloadRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: DownloadRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: DownloadRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Token", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Token = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *DownloadResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: DownloadResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: DownloadResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
+			}
+			var byteLen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				byteLen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if byteLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + byteLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Data = append(m.Data[:0], dAtA[iNdEx:postIndex]...)
+			if m.Data == nil {
+				m.Data = []byte{}
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ConfigRefreshRequest) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ConfigRefreshRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ConfigRefreshRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AgentID", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.AgentID = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PluginName", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.PluginName = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Fingerprint", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Fingerprint = append(m.Fingerprint, &ConfigFingerPrint{})
+			if err := m.Fingerprint[len(m.Fingerprint)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ConfigFingerPrint) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ConfigFingerPrint: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ConfigFingerPrint: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Path", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Path = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Hash", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Hash = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Status", wireType)
+			}
+			m.Status = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Status |= ConfigFPStatusCode(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ConfigRefreshResponse) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ConfigRefreshResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ConfigRefreshResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field PluginName", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.PluginName = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SecretKey", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SecretKey = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Version", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Version = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Release", wireType)
+			}
+			m.Release = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Release |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Status", wireType)
+			}
+			m.Status = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Status |= ConfigStatusCode(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Config", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Config = append(m.Config, &ConfigDetail{})
+			if err := m.Config[len(m.Config)-1].Unmarshal(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := skipGrpc(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.XXX_unrecognized = append(m.XXX_unrecognized, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ConfigDetail) Unmarshal(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return ErrIntOverflowGrpc
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ConfigDetail: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ConfigDetail: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Path", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Path = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Status", wireType)
+			}
+			m.Status = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Status |= ConfigStatusCode(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Data", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Data = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Type", wireType)
+			}
+			m.Type = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.Type |= ConfigTypeCode(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Hash", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Hash = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 6:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Detail", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGrpc
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return ErrInvalidLengthGrpc
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Detail = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGrpc(dAtA[iNdEx:])
