@@ -1,75 +1,52 @@
-# Elkeid 二开整合说明（net2817 fork）
+# Elkeid 二开整合状态
 
-本文档说明本仓库相对上游 `bytedance/Elkeid`（main 分支）做了哪些精选整合、来源分支、以及哪些仍待补充。
+审计日期：2026-11-23  
+上游基线：[bytedance/Elkeid `main`](https://github.com/bytedance/Elkeid/tree/main)，`c906c512`  
+本仓库：[net2817/Elkeid `main`](https://github.com/net2817/Elkeid/tree/main)，当前头 `e5873fe`
 
-基准：上游 `main`（commit `c906c512`，2026-04-27）。
+目标 `main` 相对上游基线有 3 个额外提交；两项分支代码已进入目标仓库，另有整合说明提交：
 
----
-
-## 一、从其它分支合并进来的功能（精选整合）
-
-### 1. driver v1.9（来源：`bytedance/Elkeid` 分支 `v3.0`）
-
-将上游 `driver/` 整体替换为 v1.9 自包含驱动包（C LKM + Rust 用户态 + eBPF）。相对 main 的 v1.7 驱动，新增/变化：
-
-| 能力 | 说明 |
-|---|---|
-| **HIPS 执行阻断** | `LKM/src/protector.c` 等，支持 exe/argv 规则，命中返回 -EPERM（主动防御/高危命令前置阻断） |
-| **钩子迁移 tracepoint** | 从 kprobe/kretprobe 迁移到 tracepoint，性能与覆盖更好 |
-| **Rust 用户态 + eBPF** | `driver/rust`、`driver/BPF`、`driver/ebpf`、`driver/libbpf`、`driver/ring`、`driver/xfer` |
-| **移除 /proc /dev 暴露** | 接口从 `/proc/elkeid-endpoint`、`/dev/hids_driver_allowlist` 改为 `/proc/hids_driver/N`，反规避 |
-| 内核版本兼容 | >= 3.10 |
-
-> ⚠️ 注意：v1.9 驱动接口变化（`/proc/hids_driver/N`），原 `plugins/driver`（读 `/proc/elkeid-endpoint`）需同步适配后才能联调；该驱动为 WIP，需在 Linux 上编译验证（LKM + Rust musl + eBPF CO-RE）。
-
-### 2. agent_center 2.2.3（来源：`bytedance/Elkeid` 分支 `2.2.3/ac`）
-
-将 `server/agent_center/` 整体替换为 2.2.3 版本。相对 main 新增：
-
-| 能力 | 说明 |
-|---|---|
-| 连接限流 | `conn/limit` 动态限流接口（`http_handler/limit.go`） |
-| 配置指纹热更新 | `grpc_handler/config_handler.go`，release 版本号校验 + 配置下发 |
-| Enhanced 防护等级字段 | `grpc.proto` 中 `MQData.Enhanced = 16`，用于区分防护等级 |
-| ZSTD 压缩 | 传输压缩增强 |
-| 心跳批量 | join/evict bulk 写入 |
-| 指标增强 | agent/plugin/driver 心跳 metric 字段校验 |
-
----
-
-## 二、默认功能（main 原生，未改动）
-
-以下为上游 main 自带的社区能力，保持原样：
-
-- 采集：execve(59)、connect(42)、dns(601)、提权(604/611)、模块加载(603)、ptrace(101)、文件类(rename/link/mount/memfd) 等内核钩子
-- 反 rootkit：syscall 表 hook(701)、中断表 hook(703)、proc 文件 hook(700)、隐藏模块(702)
-- 插件：driver / collector（资产、漏洞、弱口令、完整性）/ scanner（yara+clamav+fanotify FIM+蜜罐）/ journal_watcher（SSH）/ baseline
-- RASP 探针（CPython/Golang/JVM/NodeJS/PHP，含 JVM 内存马检测）
-- 后端：AgentCenter、ServiceDiscovery、Manager、Console、HUB 规则引擎集成
-
----
-
-## 三、评估后未合并的分支（及原因）
-
-| 分支 | 内容 | 未合并原因 |
+| 目标提交 | 来源 | 导入内容 |
 |---|---|---|
-| `2.2.x/scanner` | 扫描器更新 | main 的 scanner 已更新于分支（分支是 2023 年旧开发线，落后 main） |
-| `memshell-main` | JVM 内存马检测 | 已并入 main 的 rasp/jvm（SmithProbe 等） |
-| `rasp-feat-asmhook` | ASM hook | 相对 main 空 diff（WIP/未落地） |
-| `rasp-engine` | RASP 引擎重构 | WIP，改动 jvm+librasp+plugin，会破坏稳定 rasp |
-| `csc/0.9.12` | 云安全中心(CSC) | 与 2.2.3/ac 的 agent_center 重叠；CSC 为云化专用能力，需人工评估后并入 |
-| `audit_log` 等 | 审计日志等 | 2021 年旧单点分支 |
+| [`43de387`](https://github.com/net2817/Elkeid/commit/43de387dc7a8eb504f6cc2e93f941bcb99dbc133) | 上游 `v3.0` | 整个 `driver/` 子树；目录内容与上游该分支一致，版本文件为 `3.0.0.7` |
+| [`18c40c0`](https://github.com/net2817/Elkeid/commit/18c40c01fcfe23a0032e27ced543a7a41fb7eeba) | 上游 `2.2.3/ac` | 整个 `server/agent_center/` 子树；目录内容与上游该分支一致 |
+| [`e5873fe`](https://github.com/net2817/Elkeid/commit/e5873fe72fede48355cfb68e58b3627156f180b5) | 本仓库文档 | 首版整合说明 |
 
----
+## 从其它分支导入
 
-## 四、按业务要求仍需补充/开发的功能
+### 驱动：上游 `v3.0`
 
-结合企业版功能表与目标场景，仍需补充（详见排期计划文档）：
+- 新驱动代码含 LKM、BPF 和 ring 通道。
+- 执行路径/命令规则与 MD5 规则用于阻断匹配的程序；`smith_exec_load` 对命中规则返回 `-EACCES`。
+- `protector.c` 的 `-EPERM` 用于保护 Elkeid 进程/目录不被 kill、ptrace 或写改；它不是程序白名单的拒绝策略。
+- 驱动中的 exe/argv allowlist 用于过滤部分采集事件。它没有实现“只允许白名单程序执行”的默认拒绝模式，也未看到完整策略签名、灰度和审计接口。
 
-1. **白名单放行**：v1.9 HIPS 阻断需配套 exe/argv 白名单/例外/学习模式（否则误伤）；v1.9 移除了 `/dev/hids_driver_allowlist`，需确认白名单下发新通道。
-2. **文件完整性监控（FIM）告警闭环**：fanotify + SHA-256 基线已有，需接 HUB 规则 + Console 展示。
-3. **网络阻断**：外联 IP/域名实时 drop（eBPF socket/TC）——driver v1.9 的 eBPF 为采集，阻断需扩展。
-4. **检测/分析**：行为序列检测、告警聚合/降噪、威胁情报（离线 IOC）、事件追溯、UEBA。
-5. **响应处置**：进程/文件处置、文件隔离。
-6. **合规**：审计留存防篡改(WORM)、合规报表、离线 NTP、RBAC/操作审计。
-7. **验证**：整合后的 driver v1.9 与 agent_center 2.2.3 需在 Linux 上编译 + 联调验证（本整合为代码级合并，未做编译验证）。
+### Agent Center：上游 `2.2.3/ac`
+
+- 动态连接限流、配置指纹热更新、增强防护等级字段、ZSTD 传输、批量心跳和指标字段更新。
+- 该导入只替换 `server/agent_center/`，需要与目标 Agent、Console、HUB 的协议和配置共同联调。
+
+## 集成风险与立即待办
+
+1. **Agent 与新驱动接口需对齐。** `plugins/driver/src/config.rs` 仍声明 `KMOD_VERSION=1.7.0.6`、`/proc/elkeid-endpoint`、`/dev/hids_driver_allowlist`；新驱动 README 写 `/proc/hids_driver/1` 和 `/dev/hids_driver_whitelist`。LKM 的 `trace.h` 与 Rust 插件对 add/delete 白名单命令的字符定义也不一致。应先统一模块版本、事件 pipe、控制节点和指令码。
+2. **驱动 CI 仍指向旧目录。** `.github/workflows/Elkeid_driver_build.yml` 和 release workflow 引用 `driver/build_script/*`、`driver/dockerfiles.*`；当前导入的 `driver/` 子树没有这些路径。需要将 build/release workflow 改到 v3.0 驱动构建方式后再发版。
+3. **尚未做 Linux 构建和运行联调。** 需要验证 x86_64/aarch64、支持内核、驱动安装/卸载、Agent 数据通路、事件丢失和策略更新。当前仓库记录的是代码导入，不代表已验证可部署。
+
+## 默认已有能力
+
+上游 README 将 Linux 数据采集、RASP 探针、Kubernetes Audit Log、Agent 控制面、主机状态/详情、基础资产、容器集群资产、告警白名单、病毒扫描、插件管理、系统监控和系统管理列为社区版与企业版共有能力。目标仓库继承这些上游能力，但 `driver/` 和 `agent_center/` 已被上表分支版本替换，不能再描述为“默认目录未改动”。
+
+Hub 的“告警白名单”和驱动 exe/argv 采集过滤都不是执行型程序白名单。主线 Scanner 中的 fanotify 代码可对文件事件触发扫描；这不等于具有基线、变更历史、完整性告警和漏事件 reconciliation 的完整 FIM。
+
+来源：[上游功能表](https://github.com/bytedance/Elkeid/blob/main/README-zh_CN.md)、[主线 Scanner](https://github.com/bytedance/Elkeid/blob/main/plugins/scanner/src/model/functional/fmonitor.rs)
+
+## 还需按企业业务补齐
+
+- **程序执行白名单：** 策略 API、签名者/哈希身份、审核模式、默认拒绝模式、例外、灰度、回滚、离线策略和阻断审计。
+- **完整 FIM：** 文件基线与变更前后记录，创建/修改/删除/重命名事件，队列溢出恢复、跨容器/overlayfs/网络盘覆盖和事件留存。
+- **内核安全：** 修复上面的接口与 CI 缺口，建立内核/发行版矩阵、kprobe/tracepoint/锁和卸载路径审查、Secure Boot/签名模块/lockdown 降级策略。
+- **企业检测响应：** 按上游 README 企业差异完成行为序列关联、溯源聚合、K8s 威胁分析、进程/网络/文件处置、隔离、漏洞情报热更新、RASP 热补丁、UEBA 和 Windows Agent。
+
+README 将蜜罐、主动防御、云查杀和防篡改标为规划项。它没有把完整 FIM 单列为已完成企业能力。
+
+详细 87 分支账本、开发分支候选和 PR 状态见 [`docs/enterprise-branch-audit.md`](docs/enterprise-branch-audit.md)。
