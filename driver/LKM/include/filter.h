@@ -3,25 +3,34 @@
 #ifndef FILTER_H
 #define FILTER_H
 
-#define FILTER_DEVICE_NAME "hids_driver_allowlist"
-#define FILTER_CLASS_NAME "hids_driver_allowlist"
+#include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/device.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/list.h>
+#include <linux/uaccess.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
+#include <linux/rbtree.h>
+#include <linux/namei.h>
 
-#define SHMEM_MAX_SIZE 8192
+struct image_hash;
+struct exe_item;
 
-int filter_init(void);
+struct filter_ops {
+    int (*exe_check)(char *data, int len, uint64_t hash);
+    int (*argv_check)(char *data, int len);
+    int (*hash_check)(struct image_hash *md5);
+    int (*rule_check)(struct exe_item *items, int nitems, char *id);
+    int (*ipv4_check)(uint32_t ip);
+    int (*ipv6_check)(uint32_t *ip);
+    int (*ioctl)(int cmd, const __user char *buf);
+    int (*store)(const char *buf, int len);
+};
+extern struct filter_ops g_flt_ops;
 
-void filter_cleanup(void);
-
-int execve_exe_check(char *data, int len);
-
-int file_notify_check(u8 *uuid, unsigned long inode, const char *name, int nlen, int mask);
-
-int execve_argv_check(char *data, int len);
-
-size_t filter_process_allowlist(const __user char *buff, size_t len);
-
-/* opened-instances tracing for trace proc entry and filter device */
-void filter_show_instances(void);
-void trace_show_instances(void);
+extern int smith_register_exec_load(void);
+extern int smith_unregister_exec_load(void);
 
 #endif /* FILTER_H */

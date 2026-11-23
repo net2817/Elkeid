@@ -867,9 +867,14 @@ static __always_inline bool full_hit(struct tb_ring *buffer, int cpu, int full)
 	if (!nr_pages || !full)
 		return true;
 
-	dirty = tb_nr_dirty_pages(buffer, cpu);
-
-	return (dirty * 100) > (full * nr_pages);
+       /*
+        * Add one as dirty will never equal nr_pages, as the sub-buffer
+        * that the writer is on is not counted as dirty.
+        * This is needed if "buffer_percent" is set to 100.
+        */
+       dirty = tb_nr_dirty_pages(buffer, cpu) + 1;
+ 
+       return (dirty * 100) >= (full * nr_pages);
 }
 
 /*
@@ -2862,6 +2867,58 @@ tb_recursive_unlock(struct tb_per_cpu *cpu_ring)
 		cpu_ring->current_context - (1 << cpu_ring->nest);
 }
 
+/* The recursive locking above uses 5 bits */
+#define NESTED_BITS 5
+
+void tb_nest_start(struct tb_ring *buffer);
+void tb_nest_end(struct tb_ring *buffer);
+
+/**
+ * tb_nest_start - Allow to trace while nested
+ * @buffer: The ring buffer to modify
+ *
+ * The ring buffer has a safety mechanism to prevent recursion.
+ * But there may be a case where a trace needs to be done while
+ * tracing something else. In this case, calling this function
+ * will allow this function to nest within a currently active
+ * tb_lock_reserve().
+ *
+ * Call this function before calling another tb_lock_reserve() and
+ * call tb_nest_end() after the nested tb_unlock_commit().
+ */
+void tb_nest_start(struct tb_ring *buffer)
+{
+	struct tb_per_cpu *cpu_ring;
+	int cpu;
+
+	/* Enabled by tb_nest_end() */
+	preempt_disable_notrace();
+	cpu = raw_smp_processor_id();
+	cpu_ring = buffer->buffers[cpu];
+	/* This is the shift value for the above recursive locking */
+	cpu_ring->nest += NESTED_BITS;
+}
+
+/**
+ * tb_nest_end - Allow to trace while nested
+ * @buffer: The ring buffer to modify
+ *
+ * Must be called after tb_nest_start() and after the
+ * tb_unlock_commit().
+ */
+void tb_nest_end(struct tb_ring *buffer)
+{
+	struct tb_per_cpu *cpu_ring;
+	int cpu;
+
+	/* disabled by tb_nest_start() */
+	cpu = raw_smp_processor_id();
+	cpu_ring = buffer->buffers[cpu];
+	/* This is the shift value for the above recursive locking */
+	cpu_ring->nest -= NESTED_BITS;
+	preempt_enable_notrace();
+}
+
 /**
  * tb_unlock_commit - commit a reserved
  * @buffer: The buffer to commit to
@@ -3232,7 +3289,7 @@ tb_reserve_next_event(struct tb_ring *buffer,
 	 * storm or we have something buggy.
 	 * Bail!
 	 */
-	if (RB_WARN_ON(cpu_ring, ++nr_loops > 1000))
+	if (++nr_loops > 1000)
 		goto out_fail;
 
 	event = __tb_reserve_next(cpu_ring, &info);

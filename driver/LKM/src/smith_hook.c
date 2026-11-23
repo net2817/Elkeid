@@ -1,39 +1,58 @@
+
 // SPDX-License-Identifier: GPL-2.0
 /*
  * smith_hook.c
  *
  * Hook some kernel function
  */
-#include "../include/smith_hook.h"
-#include "../include/trace.h"
-
-#define CREATE_PRINT_EVENT
-#include "../include/kprobe_print.h"
-
 #include <linux/kthread.h>
 #include <linux/moduleparam.h>
+#include <linux/highmem.h>
+#include <linux/vmalloc.h>
+
+#include "../include/smith_hook.h"
+#include "../include/trace.h"
+#include "../include/protector.h"
+
+/*
+ * network related header files
+ */
+#include <linux/skbuff.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
-
 #if IS_ENABLED(CONFIG_IPV6)
 #include <linux/ipv6.h>
 #include <net/ipv6.h> /* ipv6_addr_any */
 #include <linux/netfilter_ipv6.h>
 #endif
 
-#define EXIT_PROTECT 0
-#define SANDBOX 0
-#define SMITH_MAX_ARG_STRINGS (16)
+/* mount_ns and pid_ns id for systemd process */
+static void *ROOT_MNT_NS;
+static void *ROOT_MNT_SB;
+static uint64_t ROOT_MNT_NS_ID;
 
-/*
- * Hookpoint switch defintions
- */
+#undef SD_XFER_DEFINE
+#define SD_XFER_DEFINE(n, p, x) SD_XFER_DEFINE_N(n, p, x)
+#include "../include/kprobe_print.h"
+
+#define EXIT_PROTECT 0
+static int SANDBOX;
+module_param(SANDBOX, int, S_IRUSR|S_IRGRP|S_IROTH);
+
+#define SMITH_MAX_ARG_STRINGS (16)
+#define SMITH_MAX_CMDLINE     SD_STR_MAX
 
 #define SMITH_HOOK(name, on)                    \
     static int name##_HOOK = (on);              \
-    module_param(name##_HOOK, int, 0400)
+    module_param(name##_HOOK, int, S_IRUSR|S_IRGRP|S_IROTH)
+
+// Hookpoint switch defintions
 
 SMITH_HOOK(CONNECT, 1);
+SMITH_HOOK(TCPCONN, 0); /* MaaS tcp connection auditing */
+
 SMITH_HOOK(BIND, 1);
 SMITH_HOOK(EXECVE, 1);
 SMITH_HOOK(CREATE_FILE, 1);
@@ -46,143 +65,72 @@ SMITH_HOOK(SETSID, 1);
 SMITH_HOOK(PRCTL, 1);
 SMITH_HOOK(MEMFD_CREATE, 1);
 SMITH_HOOK(MOUNT, 1);
+SMITH_HOOK(DNS, 1);
 SMITH_HOOK(USERMODEHELPER, 1);
 SMITH_HOOK(UDEV, 1);
 SMITH_HOOK(CHMOD, 1);
+
+SMITH_HOOK(WRITE, 0);
+SMITH_HOOK(ACCEPT, 1);
+SMITH_HOOK(OPEN, 0);
+SMITH_HOOK(CLOSE, 1);
+SMITH_HOOK(MPROTECT, 0);
 SMITH_HOOK(NANOSLEEP, 0);
+SMITH_HOOK(KILL, 0);
+SMITH_HOOK(RM, 0);
+SMITH_HOOK(EXIT, 0);
 
-SMITH_HOOK(WRITE, SANDBOX);
-SMITH_HOOK(ACCEPT, SANDBOX);
-SMITH_HOOK(OPEN, SANDBOX);
-SMITH_HOOK(MPROTECT, SANDBOX);
-SMITH_HOOK(KILL, SANDBOX);
-SMITH_HOOK(RM, SANDBOX);
-SMITH_HOOK(EXIT, SANDBOX);
+static int FAKE_SLEEP = 0;
+static int FAKE_RM = 0;
 
-/*
- *
- * raw tracepoint brings severe performance penalty for syscall-intensive ops.
- * so disabled by default, and enabled only for SANDBOX or kernels >= 5.5.0
- * 5.4.210 was used before, but ubuntu 20.04 focal defines kernel version as
- * 5.4.255 for 5.4.0-xxx versions, which brings disorders
- */
-SMITH_HOOK(RAWTP, SANDBOX || (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0)));
-SMITH_HOOK(DNS, SANDBOX || (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 5, 0)));
-
-static int FAKE_RM = SANDBOX;
-
-#if SANDBOX
-static int PID_TREE_LIMIT = 100;
-static int PID_TREE_LIMIT_LOW = 100;
-static int EXECVE_GET_SOCK_PID_LIMIT = 100;
-static int EXECVE_GET_SOCK_FD_LIMIT = 100;
-#else
 static int PID_TREE_LIMIT = 12;
 static int PID_TREE_LIMIT_LOW = 8;
 static int EXECVE_GET_SOCK_PID_LIMIT = 4;
 static int EXECVE_GET_SOCK_FD_LIMIT = 12;  /* maximum fd numbers to be queried */
-#endif
 
-static char connect_syscall_kprobe_state = 0x0;
-static char execve_kretprobe_state = 0x0;
-static char bind_kprobe_state = 0x0;
 static char create_file_kprobe_state = 0x0;
-static char ptrace_kprobe_state = 0x0;
-static char do_init_module_kprobe_state = 0x0;
 static char update_cred_kprobe_state = 0x0;
-static char ip4_datagram_connect_kprobe_state = 0x0;
-static char ip6_datagram_connect_kprobe_state = 0x0;
-static char tcp_v4_connect_kprobe_state = 0x0;
-static char tcp_v6_connect_kprobe_state = 0x0;
 static char mprotect_kprobe_state = 0x0;
 static char mount_kprobe_state = 0x0;
 static char rename_kprobe_state = 0x0;
 static char link_kprobe_state = 0x0;
-static char setsid_kprobe_state = 0x0;
-static char prctl_kprobe_state = 0x0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-static char memfd_create_kprobe_state = 0x0;
-#endif
-static char accept_kretprobe_state = 0x0;
-static char accept4_kretprobe_state = 0x0;
 static char open_kprobe_state = 0x0;
 static char openat_kprobe_state = 0x0;
-static char nanosleep_kprobe_state = 0x0;
-static char kill_kprobe_state = 0x0;
-static char tkill_kprobe_state = 0x0;
 static char exit_kprobe_state = 0x0;
 static char exit_group_kprobe_state = 0x0;
 static char security_path_rmdir_kprobe_state = 0x0;
 static char security_path_unlink_kprobe_state = 0x0;
 static char call_usermodehelper_exec_kprobe_state = 0x0;
 static char write_kprobe_state = 0x0;
+static char tcp_connect_kprobe_state = 0x0;
 
-#ifdef CONFIG_COMPAT
-static char compat_execve_kretprobe_state = 0x0;
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-static char execveat_kretprobe_state = 0x0;
-#ifdef CONFIG_COMPAT
-static char compat_execveat_kretprobe_state = 0x0;
-#endif
-#endif
-
-#if EXIT_PROTECT == 1
-void exit_protect_action(void)
+#if (EXIT_PROTECT == 1) && defined(MODULE)
+static void exit_protect_action(void)
 {
 	__module_get(THIS_MODULE);
 }
 #endif
 
-static struct task_struct *smith_get_task_struct(struct task_struct *tsk)
+/*
+ * wrapper for ktime_get_boottime
+ */
+
+#include <linux/jiffies.h>
+static uint64_t smith_get_jiffies(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
-    if (tsk && refcount_inc_not_zero(&tsk->usage))
-#else
-    if (tsk && atomic_inc_not_zero((atomic_t *)&tsk->usage))
-#endif
-        return tsk;
-    return NULL;
+    /* converted jiffies to USER_HZ, normally 100 */
+    return jiffies_64_to_clock_t(get_jiffies_64());
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 39)
-static void (*__smith_put_task_struct)(struct task_struct *t);
-static void smith_put_task_struct(struct task_struct *t)
+static uint64_t g_loaded_jiffies;
+
+/* uint32_t is enough for total seconds of 136+ years */
+static uint32_t smith_get_delta(uint32_t start)
 {
-	if (atomic_dec_and_test(&t->usage))
-		__smith_put_task_struct(t);
-}
-#else
-#define smith_put_task_struct(tsk)  put_task_struct(tsk)
-#endif
+    uint64_t delta = smith_get_jiffies() - g_loaded_jiffies;
 
-unsigned int ROOT_PID_NS_INUM;
-
-static inline void __init_root_pid_ns_inum(void) {
-    struct pid *pid_struct;
-    struct task_struct *task;
-
-    pid_struct = find_get_pid(1);
-    task = pid_task(pid_struct,PIDTYPE_PID);
-
-    smith_get_task_struct(task);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-    ROOT_PID_NS_INUM = task->nsproxy->pid_ns_for_children->ns.inum;
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0)
-    ROOT_PID_NS_INUM = task->nsproxy->pid_ns_for_children->proc_inum;
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
-    ROOT_PID_NS_INUM = task->nsproxy->pid_ns->proc_inum;
-#else
-    /*
-     * For kernels < 3.8.0, id for pid namespaces isn't defined.
-     * So here we are using fixed values, no emulating any more,
-     * previously we were using image file's inode number.
-     */
-    ROOT_PID_NS_INUM = 0xEFFFFFFCU /* PROC_PID_INIT_INO */;
-#endif
-    smith_put_task_struct(task);
-    put_pid(pid_struct);
+    do_div(delta, USER_HZ);
+    return (uint32_t)delta + start;
 }
 
 /*
@@ -285,7 +233,7 @@ static int __init smith_start_delayed_put(void)
     g_delayed_put_thread = kthread_create(smith_delayed_put_worker, 0, "elkeid - dput");
     if (IS_ERR(g_delayed_put_thread)) {
         int rc = g_delayed_put_thread ? PTR_ERR(g_delayed_put_thread) : -ENOMEM;
-        printk("smith_start_delayed_put: failed creating delayed_fput worker: %d\n", rc);
+        printk("smith_start_delayed_put: failed creating dealyed_fput worker: %d\n", rc);
         return rc;
     }
 
@@ -304,6 +252,7 @@ static void smith_stop_delayed_put(void)
     /* kthread_stop will wait until worker thread exits */
     if (!IS_ERR_OR_NULL(g_delayed_put_thread)) {
         kthread_stop(g_delayed_put_thread);
+        g_delayed_put_thread = NULL;
     }
 
     /* make sure no records leaked */
@@ -330,11 +279,13 @@ static void smith_insert_delayed_put_node(struct delayed_put_node *dnod)
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 6, 0)
+#define smith_sockfd_put(sock) sockfd_put(sock)
 static void smith_fput(struct file *filp)
 {
     fput(filp);
 }
 #else
+#define smith_sockfd_put(sock) smith_fput(sock->file)
 static void smith_fput(struct file *filp)
 {
     struct delayed_put_node *dnod;
@@ -429,17 +380,71 @@ static struct file *smith_fget_raw(unsigned int fd)
 	return file;
 }
 
-
-static char *smith_d_path(const struct path *path, char *buf, int buflen)
+static char *(*smith_d_absolute_path)(const struct path *path,
+	       char *buf, int buflen);
+static __always_inline char *smith_d_path(const struct path *path, char *buf, int buflen)
 {
     char *name = DEFAULT_RET_STR;
     if (buf) {
-        name = d_path(path, buf, buflen);
+        name = smith_d_absolute_path(path, buf, buflen);
+        if (PTR_ERR(name) == -EINVAL && d_path != smith_d_absolute_path)
+            name = d_path(path, buf, buflen);
         if (IS_ERR(name))
             name = NAME_TOO_LONG;
     }
     return name;
 }
+
+/*
+ * dentry_path_raw implementation for kernels < 2.6.38
+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 38)
+static int prepend(char **buffer, int *buflen, const char *str, int namelen)
+{
+    *buflen -= namelen;
+    if (*buflen < 0)
+        return -ENAMETOOLONG;
+    *buffer -= namelen;
+    memcpy(*buffer, str, namelen);
+    return 0;
+}
+
+static int prepend_name(char **buffer, int *buflen, struct qstr *name)
+{
+    return prepend(buffer, buflen, name->name, name->len);
+}
+
+//get file path from dentry struct
+static char *__dentry_path(struct dentry *dentry, char *buf, int buflen)
+{
+    char *end = buf + buflen;
+    char *retval;
+
+    prepend(&end, &buflen, "\0", 1);
+    if (buflen < 1)
+        goto Elong;
+    retval = end - 1;
+    *retval = '/';
+
+    while (!IS_ROOT(dentry)) {
+        struct dentry *parent = dentry->d_parent;
+        int error;
+
+        prefetch(parent);
+        spin_lock(&dentry->d_lock);
+        error = prepend_name(&end, &buflen, &dentry->d_name);
+        spin_unlock(&dentry->d_lock);
+        if (error != 0 || prepend(&end, &buflen, "/", 1) != 0)
+            goto Elong;
+
+        retval = end;
+        dentry = parent;
+    }
+    return retval;
+Elong:
+    return ERR_PTR(-ENAMETOOLONG);
+}
+#endif /* < 2.6.38 */
 
 /*
  * query task's executable image file, with mmap lock avoided, just because
@@ -448,9 +453,36 @@ static char *smith_d_path(const struct path *path, char *buf, int buflen)
  * there could be races on mm->exe_file, but we could assure we can always
  * get a valid filp or NULL
  */
-static struct file *smith_get_current_exe_file(void)
+static inline struct file *smith_get_task_exe_file(struct task_struct *task)
 {
     struct file *exe = NULL;
+
+    /*
+     * get_task_mm/mmput must be avoided here
+     *
+     * mmput would put current task to sleep, which violates kprobe. or
+     * use mmput_async instead, but it's only available for after 4.7.0
+     * (and CONFIG_MMU is enabled)
+     */
+    task_lock(task);
+    if (task->mm && task->mm->exe_file) {
+        exe = task->mm->exe_file;
+        if (!smith_get_file(exe))
+            exe = NULL;
+    }
+    task_unlock(task);
+
+    return exe;
+}
+
+// get full path of current task's executable image
+static __always_inline char *smith_get_exe_file(char *buffer, int size)
+{
+    char *exe_file_str = DEFAULT_RET_STR;
+    struct file *exe;
+
+    if (!buffer || !current->mm)
+        return exe_file_str;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
     /*
@@ -461,87 +493,161 @@ static struct file *smith_get_current_exe_file(void)
      */
     exe = get_mm_exe_file(current->mm);
 #else
-    /*
-     * get_task_mm/mmput must be avoided here
-     *
-     * mmput would put current task to sleep, which violates kprobe. or
-     * use mmput_async instead, but it's only available for after 4.7.0
-     * (and CONFIG_MMU is enabled)
-     */
-    task_lock(current);
-    if (current->mm && current->mm->exe_file) {
-        exe = current->mm->exe_file;
-        if (!smith_get_file(exe))
-            exe = NULL;
-    }
-    task_unlock(current);
+    exe = smith_get_task_exe_file(current);
 #endif
-
-    return exe;
-}
-
-// get full path of current task's executable image
-static char *smith_get_exe_file(char *buffer, int size)
-{
-    char *exe_file_str = DEFAULT_RET_STR;
-    struct file *exe;
-
-    if (!buffer || !current->mm)
-        return exe_file_str;
-
-    exe = smith_get_current_exe_file();
     if (exe) {
         exe_file_str = smith_d_path(&exe->f_path, buffer, size);
-        fput(exe);
+        smith_fput(exe);
     }
 
     return exe_file_str;
 }
 
-static char *smith_query_exe_path(char **alloc, int len, int min)
+static char *smith_get_pwd_path(char *buffer, int size)
 {
-    char *buffer = NULL;
+    if (!current->fs)
+        return buffer;
 
-    while (len >= min) {
-        buffer = smith_kzalloc(len, GFP_ATOMIC);
-        if (buffer)
-            break;
-        len = len / 2;
-    }
-    *alloc = buffer;
-    return smith_get_exe_file(buffer, len);
+    return smith_d_path(&current->fs->pwd, buffer, size);
 }
+
+static char *smith_get_file_path(int fd, char *buffer, int size)
+{
+    struct file *filp = smith_fget_raw(fd);
+    char *path;
+
+    if (!filp)
+        return buffer;
+
+    path = smith_d_path(&filp->f_path, buffer, size);
+    smith_fput(filp);
+
+    return path;
+}
+
+/* cache of executable images, managed by rbtree and lru list */
+#define SI_IMG_LENGTH  (384)
+#define SI_IMG_BUFLEN  (SI_IMG_LENGTH - offsetof(struct smith_img, si_buf))
+
+struct smith_img {
+    struct tt_node      si_node;    /* rbtree of cached img */
+    struct list_head    si_link;    /* lru list for reaper */
+    struct file        *si_exe;     /* executable image */
+    void               *si_sb;      /* superblock pointer of target volume */
+    uint64_t            si_size;    /* file size */
+    ino_t               si_ino;     /* inode number of the executable image */
+    uint32_t            si_age;     /* time stamp in seconds */
+    uint16_t            si_max;
+    uint16_t            si_len;
+    uint64_t            si_murmur64;/* murmur64 of si_path */
+    struct image_hash   si_md5;
+    char               *si_path;
+
+    union {
+        char           *si_alloc;
+        char            si_buf[0];
+    };
+};
+
+static struct smith_img *smith_find_task_img(struct task_struct *task);
+static struct smith_img *smith_find_file_img(struct file *filp);
+static void smith_put_img(struct smith_img *img);
 
 /*
- * wrapper for ktime_get_real_seconds
+ * wrapper for trusted exe checking
  */
+static inline int smith_is_exe_trusted(struct smith_img *img)
+{
+    return g_flt_ops.exe_check(img->si_path, img->si_len,
+                               img->si_murmur64);
+}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-#define smith_get_seconds ktime_get_real_seconds
-#else /* < 5.11.0 */
-static uint64_t (*smith_ktime_get_real_seconds)(void);
-static uint64_t smith_get_seconds(void)
-{
-    return smith_ktime_get_real_seconds();
-}
-static uint64_t smith_get_seconds_ext(void)
-{
-    return (uint64_t)get_seconds();
-}
-static void smith_init_get_seconds(void)
-{
-    if (!smith_ktime_get_real_seconds)
-        smith_ktime_get_real_seconds = smith_get_seconds_ext;
-}
-#endif /* >= 5.11.0 */
+uint64_t (*smith_ktime_get_real_ns)(void);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 39)
+void (*__smith_put_task_struct)(struct task_struct *tsk);
+#endif
 
 static const struct cred *(*get_task_cred_sym) (struct task_struct *);
 
-static ssize_t (*smith_strscpy)(char *dest, const char *src, size_t count);
+/* to be called by smith_query_args in load_binary callback */
+static struct page * (*smith_get_arg_page_krnl)(struct linux_binprm *bprm,
+                                            unsigned long pos, int write);
 
-static int __init kernel_symbols_init(void)
+#if !defined(SMITH_HAVE_NO_MNTNS_OPS) && !defined(SMITH_HAVE_MNTNS_PROCFS)
+/* proc_ns.h introduced from v3.10, originated from proc_fs.h */
+#include <linux/proc_ns.h> /* proc_ns_operations */
+#endif
+#include <linux/mount.h>
+
+static struct proc_ns_operations *smith_mntns_ops;
+static uint64_t smith_query_mntns_id(struct task_struct *task)
+{
+    struct super_block *sb = NULL;
+    struct path pwd;
+    uint64_t mntns;
+    uint32_t inum = 0xF0000001; /* default mntns inum for kernels < 3.8 */
+
+#ifndef SMITH_HAVE_NO_MNTNS_OPS
+    void *ns;
+
+    /* mntns_operations was introduced from v3.8 */
+    if (!smith_mntns_ops || !smith_mntns_ops->get || !smith_mntns_ops->put)
+        goto errorout;
+
+#ifdef SMITH_HAVE_MNTNS_OPS_INUM
+    if (!smith_mntns_ops->inum)
+        goto errorout;
+    ns = smith_mntns_ops->get(task);
+    if (ns) {
+        inum = smith_mntns_ops->inum(ns);
+        smith_mntns_ops->put(ns);
+    }
+#else
+    /* ops->inum callback was removed from v3.19 */
+    ns = smith_mntns_ops->get(task);
+    if (ns) {
+        struct ns_common *nc = ns;
+        inum = nc->inum;
+        smith_mntns_ops->put(nc);
+    }
+#endif /* SMITH_HAVE_MNTNS_OPS_INUM */
+
+errorout:
+#endif /* !SMITH_HAVE_NO_MNTNS_OPS */
+
+    task_lock(task);
+    pwd = task->fs->pwd;
+    task_unlock(task);
+
+    /* get superblock of root fs, using as mnt namespace id */
+    sb = pwd.mnt ? pwd.mnt->mnt_sb : NULL;
+    if (sb && sb->s_fs_info)
+        mntns = (unsigned long)sb->s_fs_info;
+    else if (sb)
+        mntns = (unsigned long)sb;
+    else
+        mntns = -1;
+    mntns = (~mntns) << 28; /* canonical address */
+    mntns = (mntns & 0xFFFFFFFF00000000ULL) | inum;
+
+    return mntns;
+}
+
+ssize_t (*smith_strscpy)(char *dest, const char *src, size_t count);
+
+static struct task_struct *(*smith_get_pid_task)(struct pid *pid, enum pid_type type);
+
+static int __init kernel_init_symbols(void)
 {
     void *ptr;
+
+    ptr = (void *)smith_kallsyms_lookup_name("get_pid_task");
+    if (!ptr) {
+        printk("smith:fatal: get_pid_task not exported.\n");
+        return -ENODEV;
+    }
+    smith_get_pid_task = ptr;
 
     /* sized_strscpy introduced from v6.9 to replace strscpy */
     ptr = (void *)smith_kallsyms_lookup_name("strscpy");
@@ -549,41 +655,91 @@ static int __init kernel_symbols_init(void)
         ptr = (void *)smith_kallsyms_lookup_name("sized_strscpy");
     if (!ptr)
         ptr = (void *)smith_kallsyms_lookup_name("strlcpy");
-    if (!ptr)
+    if (!ptr) {
+        printk("smith:fatal: strs/lcpy not exported.\n");
         return -ENODEV;
+    }
     smith_strscpy = ptr;
 
     ptr = (void *)smith_kallsyms_lookup_name("put_files_struct");
-    if (!ptr)
+    if (!ptr) {
+        printk("smith:fatal: put_files_struct not exported.\n");
         return -ENODEV;
+    }
     put_files_struct_sym = ptr;
 
     ptr = (void *)smith_kallsyms_lookup_name("get_task_cred");
-    if (!ptr)
+    if (!ptr) {
+        printk("smith:fatal: get_task_cred not exported.\n");
         return -ENODEV;
+    }
     get_task_cred_sym = ptr;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 39)
     ptr = (void *)smith_kallsyms_lookup_name("__put_task_struct");
-    if (!ptr)
+    if (!ptr) {
+        printk("smith:fatal: __put_task_struct not exported.\n");
         return -ENODEV;
+    }
     __smith_put_task_struct = ptr;
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)
-    ptr = (void *)smith_kallsyms_lookup_name("ktime_get_real_seconds");
+    ptr = (void *)smith_kallsyms_lookup_name("ktime_get_real");
+    if (!ptr) {
+        printk("smith:fatal: ktime_get_real not exported.\n");
+        return -ENODEV;
+    }
+    smith_ktime_get_real_ns = ptr;
+
+/*
+ * prepend_path will throw a WARN for d_absolute_path if root
+ * dentry is not properly named:
+ *
+ *			if (IS_ROOT(dentry) &&
+ *			   (dentry->d_name.len != 1 ||
+ *			    dentry->d_name.name[0] != '/')) {
+ *				WARN(1, "Root dentry has weird name <%.*s>\n",
+ *				     (int) dentry->d_name.len,
+ *				     dentry->d_name.name);
+ *			}
+ * The above check was removed from 4.1.2. But anyway we won't
+ * try d_absolute_path for these kerenls, d_path should be fine.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 2, 0)
+    ptr = (void *)smith_kallsyms_lookup_name("d_absolute_path");
     if (ptr)
-        smith_ktime_get_real_seconds = ptr;
-    smith_init_get_seconds();
+        smith_d_absolute_path = ptr;
+    else
+        smith_d_absolute_path = (void *)d_path;
+#else
+    smith_d_absolute_path = (void *)d_path;
 #endif
+
+    ptr = (void *)smith_kallsyms_lookup_name("mntns_operations");
+    if (ptr)
+        smith_mntns_ops = ptr;
+
+
+    ptr = (void *)smith_kallsyms_lookup_name("get_arg_page");
+    if (!ptr) {
+        printk("smith WARNING: get_arg_page not exported.\n");
+    }
+    smith_get_arg_page_krnl = ptr;
 
     return 0;
 }
 
 static void to_print_privilege_escalation(const struct cred *current_cred, unsigned int p_cred_info[], char * pid_tree, int p_pid)
 {
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
+
     char p_cred[128];
     char c_cred[128];
+
+    tid = smith_lookup_tid(current);
+    if (tid)
+        exe_path = tid->st_img->si_path;
 
     snprintf(p_cred, sizeof(p_cred), "%u|%u|%u|%u|%u|%u|%u|%u", p_cred_info[0], p_cred_info[1], p_cred_info[2], p_cred_info[3],
              p_cred_info[4], p_cred_info[5], p_cred_info[6], p_cred_info[7]);
@@ -593,19 +749,18 @@ static void to_print_privilege_escalation(const struct cred *current_cred, unsig
             _XID_VALUE(current_cred->fsuid), _XID_VALUE(current_cred->gid), _XID_VALUE(current_cred->egid),
             _XID_VALUE(current_cred->sgid), _XID_VALUE(current_cred->fsgid));
 
-    privilege_escalation_print(p_pid, pid_tree, p_cred, c_cred);
+    privilege_escalation_print(exe_path, p_pid, pid_tree, p_cred, c_cred);
+
+    if (tid)
+        smith_put_tid(tid);
 }
 
-static char *smith_get_pid_tree(int limit)
+static int smith_check_privilege_escalation(int limit, char *pid_tree)
 {
-    int real_data_len = PID_TREE_MATEDATA_LEN;
     int limit_index = 0;
     int cred_detected_task_pid = 0;
     int cred_check_res = 0;
     unsigned int p_cred_info[8];
-
-    char *tmp_data = NULL;
-    char pid[24];
 
     struct task_struct *task;
     struct task_struct *old_task;
@@ -614,24 +769,10 @@ static char *smith_get_pid_tree(int limit)
 
     task = current;
     get_task_struct(task);
-
-    snprintf(pid, 24, "%d", task->tgid);
-    tmp_data = smith_kzalloc(1024, GFP_ATOMIC);
-
-    if (!tmp_data) {
-        smith_put_task_struct(task);
-        return tmp_data;
-    }
-
-    strcat(tmp_data, pid);
-    strcat(tmp_data, ".");
-    strcat(tmp_data, current->comm);
-
     current_cred = get_task_cred_sym(current);
 
-    while (1) {
-        limit_index = limit_index + 1;
-
+    //cred privilege_escalation check only check twice
+    while (++limit_index <= 2) {
         if (limit_index >= limit)
             break;
 
@@ -640,211 +781,43 @@ static char *smith_get_pid_tree(int limit)
         task = smith_get_task_struct(rcu_dereference(task->real_parent));
         rcu_read_unlock();
         smith_put_task_struct(old_task);
-        if (!task || task->pid == 0) {
+        if (!task || task->pid == 0)
             break;
-        }
 
-        //cred privilege_escalation check only check twice
-        if (!cred_check_res && limit_index <= 2) {
+        if (!cred_check_res) {
             cred_detected_task_pid = task->tgid;
             parent_cred = get_task_cred_sym(task);
             cred_check_res = check_cred(current_cred, parent_cred);
             save_cred_info(p_cred_info, parent_cred);
             put_cred(parent_cred);
         }
-
-        real_data_len = real_data_len + PID_TREE_MATEDATA_LEN;
-        if (real_data_len > 1024)
-            break;
-
-        snprintf(pid, 24, "%d", task->tgid);
-        strcat(tmp_data, "<");
-        strcat(tmp_data, pid);
-        strcat(tmp_data, ".");
-        strcat(tmp_data, task->comm);
     }
 
     if (task)
         smith_put_task_struct(task);
 
     if (cred_check_res)
-        to_print_privilege_escalation(current_cred, p_cred_info, tmp_data, cred_detected_task_pid);
+        to_print_privilege_escalation(current_cred, p_cred_info, pid_tree, cred_detected_task_pid);
 
     put_cred(current_cred);
-    return tmp_data;
+    return cred_check_res;
 }
-
-//get task tree first AF_INET/AF_INET6 socket info
-static void
-get_process_socket(__be32 * sip4, struct in6_addr *sip6, int *sport,
-                   __be32 * dip4, struct in6_addr *dip6, int *dport,
-                   pid_t * socket_pid, int *sa_family)
-{
-    struct task_struct *task = current;
-    int it = 0;
-
-    get_task_struct(task);
-    while (task && task->pid != 1 && it++ < EXECVE_GET_SOCK_PID_LIMIT) {
-        struct task_struct *old_task;
-        struct files_struct *files;
-        int i, socket_check = 0;
-
-        files = smith_get_files_struct(task);
-        if (!files)
-            goto next_task;
-
-        for (i = 0; i < EXECVE_GET_SOCK_FD_LIMIT; i++) {
-            struct socket *socket;
-            int err = 0;
-
-            rcu_read_lock();
-            /* move to next if exceeding current task's max_fds,
-               max_fds access should be protected by rcu lock */
-            if (i >= files_fdtable(files)->max_fds) {
-                rcu_read_unlock();
-                break;
-            }
-            socket = sockfd_lookup(i, &err);
-            rcu_read_unlock();
-
-            if (!IS_ERR_OR_NULL(socket)) {
-                struct sock *sk = socket->sk;
-
-                /* only process known states: SS_CONNECTING/SS_CONNECTED/SS_DISCONNECTING,
-                   SS_FREE/SS_UNCONNECTED or any possible new states are to be skipped */
-                if ((socket->state == SS_CONNECTING ||
-                     socket->state == SS_CONNECTED ||
-                     socket->state == SS_DISCONNECTING) && sk) {
-                    struct inet_sock *inet = (struct inet_sock *)sk;
-                    switch (sk->sk_family) {
-                        case AF_INET:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33)
-                            *dip4 = inet->inet_daddr;
-						    *sip4 = inet->inet_saddr;
-						    *sport = ntohs(inet->inet_sport);
-						    *dport = ntohs(inet->inet_dport);
-#else
-                            *dip4 = inet->daddr;
-                            *dip4 = inet->saddr;
-                            *sport = ntohs(inet->sport);
-                            *dport = ntohs(inet->dport);
-#endif
-                            socket_check = 1;
-                            *sa_family = sk->sk_family;
-                            break;
-#if IS_ENABLED(CONFIG_IPV6)
-                            case AF_INET6:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0) || defined(IPV6_SUPPORT)
-						    memcpy(dip6, &(sk->sk_v6_daddr), sizeof(sk->sk_v6_daddr));
-						    memcpy(sip6, &(sk->sk_v6_rcv_saddr), sizeof(sk->sk_v6_rcv_saddr));
-						    *sport = ntohs(inet->inet_sport);
-						    *dport = ntohs(inet->inet_dport);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33)
-						    memcpy(dip6, &(inet->pinet6->daddr), sizeof(inet->pinet6->daddr));
-						    memcpy(sip6, &(inet->pinet6->saddr), sizeof(inet->pinet6->saddr));
-						    *sport = ntohs(inet->inet_sport);
-						    *dport = ntohs(inet->inet_dport);
-#else
-						    memcpy(dip6, &(inet->pinet6->daddr), sizeof(inet->pinet6->daddr));
-						    memcpy(sip6, &(inet->pinet6->saddr), sizeof(inet->pinet6->saddr));
-						    *sport = ntohs(inet->sport);
-						    *dport = ntohs(inet->dport);
-#endif
-						    socket_check = 1;
-						    *sa_family = sk->sk_family;
-						    break;
-#endif
-                    }
-                }
-                sockfd_put(socket);
-            }
-        }
-        if (task == current)
-            put_files_struct_sym(files);
-        else
-            smith_put_files_struct(files);
-
-        if (socket_check) {
-            *socket_pid = task->pid;
-            smith_put_task_struct(task);
-            return;
-        }
-
-next_task:
-        old_task = task;
-        rcu_read_lock();
-        task = smith_get_task_struct(rcu_dereference(task->real_parent));
-        rcu_read_unlock();
-        smith_put_task_struct(old_task);
-    }
-
-    if (task)
-        smith_put_task_struct(task);
-
-    return;
-}
-
-struct connect_data {
-    struct sock *sk;
-    int sa_family;
-    int type;
-};
-
-struct connect_syscall_data {
-    int fd;
-    struct sockaddr *dirp;
-};
-
-struct accept_data {
-    int type;
-    union {
-        struct sockaddr    sa;
-        struct sockaddr_in si4;
-        struct sockaddr_in6 si6;
-        struct __kernel_sockaddr_storage kss; /* to avoid overflow access of kernel_getsockname */
-    };
-};
-
-struct bind_data {
-    int fd;
-    union {
-        struct sockaddr dirp;
-        struct sockaddr_in sin;
-#if IS_ENABLED(CONFIG_IPV6)
-        struct sockaddr_in6 sin6;
-#endif
-    };
-};
-
-struct execve_data {
-    char *argv;
-    char *ssh_connection;
-    char *ld_preload;
-
-    int len_argv;
-    int free_argv;
-    int free_ssh_connection;
-    int free_ld_preload;
-};
 
 /*
  * Our own implementation of kernel_getsockname and kernel_getpeername,
- * resuing codes logic of kernel inet_getname and inet6_getname.
+ * re-using codes logic of kernel inet_getname and inet6_getname.
  *
- * From 5.15.3 inet_getname and inet6_getname will call lock_sock for
- * lock acquisition, and then lock_sock would lead possible reschedule,
- * which violates the requirement of atomic context for kprobe/ketprobe.
- *
- * Interfaces of kernel_getsockname and kernel_getpeername are changed
- * after 4.17.0, then we'll use our own routines to keep things simple.
+ * Two major things to bypass:
+ * 1) From 4.17.0 interfaces of kernel_getsock/peername are changed
+ * 2) From 5.15.3 inet_getname and inet6_getname will call lock_sock,
+ *    but the lock_sock violates kprobe/ketprobe's atomic context.
  */
 
 #define SMITH_DECLARE_SOCKADDR(type, dst, src)	\
 	type dst = (type)(src)
 
-static int smith_get_sock_v4(struct socket *sock, struct sockaddr *sa)
+static int smith_get_sock_v4(struct sock *sk, struct sockaddr *sa)
 {
-    struct sock *sk	= sock->sk;
     struct inet_sock *inet = inet_sk(sk);
     SMITH_DECLARE_SOCKADDR(struct sockaddr_in *, sin, sa);
 
@@ -863,9 +836,8 @@ static int smith_get_sock_v4(struct socket *sock, struct sockaddr *sa)
     return sizeof(*sin);
 }
 
-static int smith_get_peer_v4(struct socket *sock, struct sockaddr *sa)
+static int smith_get_peer_v4(struct sock *sk, struct sockaddr *sa)
 {
-    struct sock *sk	= sock->sk;
     struct inet_sock *inet = inet_sk(sk);
     SMITH_DECLARE_SOCKADDR(struct sockaddr_in *, sin, sa);
 
@@ -881,10 +853,9 @@ static int smith_get_peer_v4(struct socket *sock, struct sockaddr *sa)
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-static int smith_get_sock_v6(struct socket *sock, struct sockaddr *sa)
+static int smith_get_sock_v6(struct sock *sk, struct sockaddr *sa)
 {
     struct sockaddr_in6 *sin = (struct sockaddr_in6 *)sa;
-    struct sock *sk = sock->sk;
     struct inet_sock *inet = inet_sk(sk);
     struct ipv6_pinfo *np = inet6_sk(sk);
     const struct in6_addr *in6;
@@ -907,10 +878,9 @@ static int smith_get_sock_v6(struct socket *sock, struct sockaddr *sa)
     return sizeof(*sin);
 }
 
-static int smith_get_peer_v6(struct socket *sock, struct sockaddr *sa)
+static int smith_get_peer_v6(struct sock *sk, struct sockaddr *sa)
 {
     struct sockaddr_in6 *sin = (struct sockaddr_in6 *)sa;
-    struct sock *sk = sock->sk;
     struct inet_sock *inet = inet_sk(sk);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0) || defined(IPV6_SUPPORT)
@@ -933,1158 +903,7 @@ static int smith_get_peer_v6(struct socket *sock, struct sockaddr *sa)
 }
 #endif
 
-/*
- * Workaround for kretprobe BUG (fixed in 3.2.6):
- *
- * kretprobe instance memory leaking if entry_handler returns failure codes.
- */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 2, 6)
-
-static int bind_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    struct bind_data *data = (struct bind_data *)ri->data;
-    struct sockaddr_storage address;
-    struct sockaddr *uaddr;
-    int ulen = p_get_arg3_syscall(regs);
-
-    if (ulen <= 0 || ulen > sizeof(struct sockaddr_storage))
-        return -EINVAL;
-
-    if (smith_copy_from_user(&address, (void __user *)p_get_arg2_syscall(regs), ulen))
-        return -EFAULT;
-
-    uaddr = (struct sockaddr *)&address;
-    if (uaddr->sa_family == AF_INET && ulen >= sizeof(data->sin))
-        memcpy(&data->sin, (void *)&address, sizeof(data->sin));
-#if IS_ENABLED(CONFIG_IPV6)
-    else if (uaddr->sa_family == AF_INET6 && ulen >= sizeof(data->sin6))
-		memcpy(&data->sin6, (void *)&address, sizeof(data->sin6));
-#endif
-    else
-        return -EINVAL;
-
-    return 0;
-}
-
-#else
-
-static int bind_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    struct bind_data *data = (struct bind_data *)ri->data;
-    struct sockaddr_storage address;
-    struct sockaddr *uaddr;
-    int ulen = p_get_arg3_syscall(regs);
-
-    /* clear bind_data to avoid unnecessary process in bind_handler */
-    memset(data, 0, sizeof(*data));
-
-    if (ulen <= 0 || ulen > sizeof(struct sockaddr_storage))
-        return 0;
-
-    if (smith_copy_from_user(&address, (void __user *)p_get_arg2_syscall(regs), ulen))
-        return 0;
-
-    uaddr = (struct sockaddr *)&address;
-    if (uaddr->sa_family == AF_INET && ulen >= sizeof(data->sin))
-        memcpy(&data->sin, (void *)&address, sizeof(data->sin));
-#if IS_ENABLED(CONFIG_IPV6)
-    else if (uaddr->sa_family == AF_INET6 && ulen >= sizeof(data->sin6))
-		memcpy(&data->sin6, (void *)&address, sizeof(data->sin6));
-#endif
-
-    return 0;
-}
-
-#endif
-
-static int bind_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    int retval, sa_family, sport;
-
-    char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-
-    struct sockaddr *uaddr;
-    struct sockaddr_in *sin;
-    struct sockaddr_in6 *sin6;
-    struct in_addr *in_addr = NULL;
-    struct in6_addr *in6_addr = NULL;
-
-    uaddr = &((struct bind_data *)ri->data)->dirp;
-    retval = regs_return_value(regs);
-    /*
-     * If the return value is not zero, the data passed by the user
-     * is untrusted. Access to untrusted data may be problematic.
-     */
-    if (retval)
-        return 0;
-
-    sa_family = uaddr->sa_family;
-    //only get AF_INET/AF_INET6 bind info
-    switch (sa_family) {
-        case AF_INET:
-            sin = &((struct bind_data *)ri->data)->sin;
-            in_addr = &sin->sin_addr;
-            sport = ntohs(sin->sin_port);
-            break;
-#if IS_ENABLED(CONFIG_IPV6)
-        case AF_INET6:
-		    sin6 = &((struct bind_data *)ri->data)->sin6;
-		    in6_addr = &sin6->sin6_addr;
-		    sport = ntohs(sin6->sin6_port);
-		    break;
-#endif
-        default:
-            return 0;
-    }
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-    if (!execve_exe_check(exe_path, strlen(exe_path))) {
-        if (sa_family == AF_INET)
-            bind_print(exe_path, in_addr, sport, retval);
-#if IS_ENABLED(CONFIG_IPV6)
-        else if (sa_family == AF_INET6)
-            bind6_print(exe_path, in6_addr, sport, retval);
-#endif
-    }
-
-    if (buffer)
-        smith_kfree(buffer);
-
-    return 0;
-}
-
-static int connect_syscall_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    int err, fd;
-    int dport = 0, sport = 0, retval, sa_family;
-
-    __be32 dip4 = 0;
-    __be32 sip4 = 0;
-
-    char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-
-    struct socket *socket;
-    struct sock *sk;
-    struct sockaddr tmp_dirp;
-    struct connect_syscall_data *data;
-    struct inet_sock *inet;
-    struct in6_addr *dip6 = NULL;
-    struct in6_addr *sip6 = NULL;
-
-    retval = regs_return_value(regs);
-
-    data = (struct connect_syscall_data *)ri->data;
-    fd = data->fd;
-
-    if (!fd || IS_ERR_OR_NULL(data->dirp))
-        return 0;
-
-    if (smith_copy_from_user(&tmp_dirp, data->dirp, 16))
-        return 0;
-
-    socket = sockfd_lookup(fd, &err);
-    if (IS_ERR_OR_NULL(socket))
-        return 0;
-
-    switch (tmp_dirp.sa_family) {
-        case AF_INET:
-                sk = socket->sk;
-                inet = (struct inet_sock *)sk;
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 32)
-				//dip4 = ((struct sockaddr_in *)&tmp_dirp)->sin_addr.s_addr;
-                dip4 = inet->inet_daddr;
-			    sip4 = inet->inet_saddr;
-			    sport = ntohs(inet->inet_sport);
-			    dport = ntohs(((struct sockaddr_in *)&tmp_dirp)->sin_port);
-			    if (dport == 0)
-			        dport = ntohs(inet->inet_dport);
-#else
-                //dip4 = ((struct sockaddr_in *)&tmp_dirp)->sin_addr.s_addr;
-                dip4 = inet->daddr;
-                sip4 = inet->saddr;
-                sport = ntohs(inet->sport);
-                dport = ntohs(((struct sockaddr_in *)&tmp_dirp)->sin_port);
-                if (dport == 0)
-                    dport = ntohs(inet->dport);
-#endif
-                sa_family = AF_INET;
-                break;
-#if IS_ENABLED(CONFIG_IPV6)
-        case AF_INET6:
-			    sk = socket->sk;
-			    inet = (struct inet_sock *)sk;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0) || defined(IPV6_SUPPORT)
-				//dip6 = &((struct sockaddr_in6 *)&tmp_dirp)->sin6_addr;
-				dip6 = &(sk->sk_v6_daddr);
-				sip6 = &(sk->sk_v6_rcv_saddr);
-				sport = ntohs(inet->inet_sport);
-				dport = ntohs(((struct sockaddr_in *)&tmp_dirp)->sin_port);
-				if (dport == 0)
-				    dport = ntohs(inet->inet_dport);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33)
-				//dip6 = &((struct sockaddr_in6 *)&tmp_dirp)->sin6_addr;
-				dip6 = &(inet->pinet6->daddr);
-				sip6 = &(inet->pinet6->saddr);
-				sport = ntohs(inet->inet_sport);
-				dport = ntohs(((struct sockaddr_in *)&tmp_dirp)->sin_port);
-				if (dport)
-				    dport = ntohs(inet->inet_dport);
-#else
-				//dip6 = &((struct sockaddr_in6 *)&tmp_dirp)->sin6_addr;
-				dip6 = &(inet->pinet6->daddr);
-				sip6 = &(inet->pinet6->saddr);
-				sport = ntohs(inet->sport);
-				dport = ntohs(((struct sockaddr_in *)&tmp_dirp)->sin_port);
-				if (dport)
-				    dport = ntohs(inet->dport);
-#endif
-			    sa_family = AF_INET6;
-			    break;
-#endif
-        default:
-                break;
-    }
-
-    if (dport != 0) {
-        buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-        exe_path = smith_get_exe_file(buffer, PATH_MAX);
-        if (!execve_exe_check(exe_path, strlen(exe_path))) {
-            if (sa_family == AF_INET)
-                connect4_print(dport, dip4, exe_path, sip4, sport, retval);
-#if IS_ENABLED(CONFIG_IPV6)
-            else if (dip6 && sip6)
-                connect6_print(dport, dip6, exe_path, sip6, sport, retval);
-#endif
-        }
-
-        if (buffer)
-            smith_kfree(buffer);
-    }
-
-    /* refed by sip6 & dip6 for ipv6 */
-    sockfd_put(socket);
-
-    return 0;
-}
-
-static int connect_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    int retval, dport = 0, sport = 0;
-
-    __be32 dip4 = 0, sip4 = 0;
-
-    char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-
-    struct sock *sk;
-    struct connect_data *data;
-    struct inet_sock *inet;
-    struct in6_addr *dip6 = NULL, *sip6 = NULL;
-
-    retval = regs_return_value(regs);
-    data = (struct connect_data *)ri->data;
-
-    sk = data->sk;
-    if (IS_ERR_OR_NULL(sk))
-        return 0;
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-
-    //exe filter check
-    if (execve_exe_check(exe_path, strlen(exe_path))) {
-        if (buffer)
-            smith_kfree(buffer);
-        return 0;
-    }
-    //only get AF_INET/AF_INET6 connect info
-    inet = (struct inet_sock *)sk;
-    switch (data->sa_family) {
-        case AF_INET:
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2, 6, 32)
-			dip4 = inet->inet_daddr;
-			sip4 = inet->inet_saddr;
-			sport = ntohs(inet->inet_sport);
-			dport = ntohs(inet->inet_dport);
-#else
-            dip4 = inet->daddr;
-            sip4 = inet->saddr;
-            sport = ntohs(inet->sport);
-            dport = ntohs(inet->dport);
-#endif
-            break;
-#if IS_ENABLED(CONFIG_IPV6)
-        case AF_INET6:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0) || defined(IPV6_SUPPORT)
-			dip6 = &(sk->sk_v6_daddr);
-			sip6 = &(sk->sk_v6_rcv_saddr);
-			sport = ntohs(inet->inet_sport);
-			dport = ntohs(inet->inet_dport);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 33)
-			dip6 = &(inet->pinet6->daddr);
-			sip6 = &(inet->pinet6->saddr);
-			sport = ntohs(inet->inet_sport);
-			dport = ntohs(inet->inet_dport);
-#else
-			dip6 = &(inet->pinet6->daddr);
-			sip6 = &(inet->pinet6->saddr);
-			sport = ntohs(inet->sport);
-			dport = ntohs(inet->dport);
-#endif
-		    break;
-#endif
-        default:
-            break;
-    }
-
-    if (dport != 0) {
-        if (data->sa_family == AF_INET)
-            //connect4_print(data->type, dport, dip4, exe_path, sip4,
-            //               sport, retval);
-            connect4_print(dport, dip4, exe_path, sip4, sport, retval);
-#if IS_ENABLED(CONFIG_IPV6)
-        else
-			//connect6_print(data->type, dport, dip6, exe_path, sip6,
-			//	       sport, retval);
-			connect6_print(dport, dip6, exe_path, sip6, sport, retval);
-#endif
-    }
-
-    if (buffer)
-        smith_kfree(buffer);
-
-    return 0;
-}
-
-/*
- * Workaround for kretprobe BUG (fixed in 3.2.6):
- *
- * kretprobe instance memory leaking if entry_handler returns failure codes.
- */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 2, 6)
-
-static int accept_entry_handler(struct kretprobe_instance *ri,
-                                struct pt_regs *regs)
-{
-    struct accept_data *data;
-    struct sockaddr *dirp;
-
-    data = (struct accept_data *)ri->data;
-    data->type = 2;
-
-    dirp = (void __user *)p_get_arg2_syscall(regs);
-    if(IS_ERR_OR_NULL(dirp))
-        return -EINVAL;
-    return 0;
-}
-
-static int accept4_entry_handler(struct kretprobe_instance *ri,
-                                 struct pt_regs *regs)
-{
-    struct accept_data *data;
-    struct sockaddr *dirp;
-
-    data = (struct accept_data *)ri->data;
-    data->type = 1;
-
-    dirp = (void __user *)p_get_arg2_syscall(regs);
-    if(IS_ERR_OR_NULL(dirp))
-        return -EINVAL;
-    return 0;
-}
-
-#else
-
-static int accept_entry_handler(struct kretprobe_instance *ri,
-                                struct pt_regs *regs)
-{
-    struct accept_data *data;
-
-    data = (struct accept_data *)ri->data;
-    data->type = 2;
-
-    return 0;
-}
-
-static int accept4_entry_handler(struct kretprobe_instance *ri,
-                                 struct pt_regs *regs)
-{
-    struct accept_data *data;
-
-    data = (struct accept_data *)ri->data;
-    data->type = 1;
-
-    return 0;
-}
-#endif
-
-static int accept_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    struct accept_data *data;
-    struct socket *sock = NULL;
-
-    int sport, dport;
-    int retval, err = 0;
-
-    char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-
-    data = (struct accept_data *)ri->data;
-    retval = regs_return_value(regs);
-    sock = sockfd_lookup(retval, &err);
-    if (IS_ERR_OR_NULL(sock))
-        goto out;
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-
-    //only get AF_INET/AF_INET6 accept info
-    if (sock->sk->sk_family == AF_INET) {
-        __be32 sip4, dip4;
-
-        if (smith_get_sock_v4(sock, &data->sa) < 0)
-            goto out;
-        dip4 = data->si4.sin_addr.s_addr;
-        dport = ntohs(data->si4.sin_port);
-
-        if (smith_get_peer_v4(sock, &data->sa) < 0)
-            goto out;
-        sip4 = data->si4.sin_addr.s_addr;
-        sport = ntohs(data->si4.sin_port);
-        accept_print(dport, dip4, exe_path, sip4, sport, retval);
-        // printk("accept4_handler: %d.%d.%d.%d/%d -> %d.%d.%d.%d/%d rc=%d\n",
-        //         NIPQUAD(sip4), sport, NIPQUAD(dip4), dport, retval);
-    }
-#if IS_ENABLED(CONFIG_IPV6)
-    else if (sock->sk->sk_family == AF_INET6) {
-        struct in6_addr *sip6, dip6;
-
-        if (smith_get_sock_v6(sock, &data->sa) < 0)
-            goto out;
-        dip6 = data->si6.sin6_addr;
-        dport = ntohs(data->si6.sin6_port);
-
-        if (smith_get_peer_v6(sock, &data->sa) < 0)
-            goto out;
-        sport = ntohs(data->si6.sin6_port);
-        sip6 = &(data->si6.sin6_addr);
-        accept6_print(dport, &dip6, exe_path, sip6, sport, retval);
-        // printk("accept6_handler: %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d"
-        //        " -> %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d rc=%d\n",
-        //         NIP6(*sip6), sport, NIP6(dip6), dport, retval);
-    }
-#endif
-
-out:
-    if (!IS_ERR_OR_NULL(sock))
-        sockfd_put(sock);
-    if (buffer)
-        smith_kfree(buffer);
-    return 0;
-}
-
-static int execve_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-    int sa_family = -1, dport = 0, sport = 0;
-    int rc = regs_return_value(regs);
-
-    __be32 dip4;
-    __be32 sip4;
-    pid_t socket_pid = -1;
-
-    char *pname = DEFAULT_RET_STR;
-    char *tmp_stdin = DEFAULT_RET_STR;
-    char *tmp_stdout = DEFAULT_RET_STR;
-    char *buffer = NULL;
-    char *pname_buf = NULL;
-    char *pid_tree = NULL;
-    char *tty_name = "-1";
-    char *exe_path = DEFAULT_RET_STR;
-    char *stdin_buf = NULL;
-    char *stdout_buf = NULL;
-
-    struct in6_addr dip6;
-    struct in6_addr sip6;
-    struct file *file;
-    struct execve_data *data;
-    struct tty_struct *tty = NULL;
-
-     /* query kretprobe instance for current call */
-    data = (struct execve_data *)ri->data;
-
-    /* ignore the failures that target doesn't exist */
-    if (rc == -ENOENT)
-        goto release_data;
-
-    tty = get_current_tty();
-    if(tty && strlen(tty->name) > 0)
-        tty_name = tty->name;
-
-    //exe filter check and argv filter check
-    exe_path = smith_query_exe_path(&buffer, PATH_MAX, 128);
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out;
-    if (execve_argv_check(data->argv, data->len_argv))
-        goto out;
-
-    get_process_socket(&sip4, &sip6, &sport, &dip4, &dip6, &dport,
-                       &socket_pid, &sa_family);
-
-    //if socket exist,get pid tree
-    if (sa_family == AF_INET6 || sa_family == AF_INET)
-        pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
-    else
-        pid_tree = smith_get_pid_tree(PID_TREE_LIMIT_LOW);
-
-    // get stdin
-    file = smith_fget_raw(0);
-    if (file) {
-        stdin_buf = smith_kzalloc(256, GFP_ATOMIC);
-        tmp_stdin = smith_d_path(&(file->f_path), stdin_buf, 256);
-        smith_fput(file);
-    }
-
-    //get stdout
-    file = smith_fget_raw(1);
-    if (file) {
-        stdout_buf = smith_kzalloc(256, GFP_ATOMIC);
-        tmp_stdout = smith_d_path(&(file->f_path), stdout_buf, 256);
-        smith_fput(file);
-    }
-
-    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
-
-    if (sa_family == AF_INET) {
-        execve_print(pname,
-                     exe_path, data->argv,
-                     tmp_stdin, tmp_stdout,
-                     dip4, dport, sip4, sport,
-                     pid_tree, tty_name, socket_pid,
-                     data->ssh_connection, data->ld_preload,
-                     rc);
-    }
-#if IS_ENABLED(CONFIG_IPV6)
-    else if (sa_family == AF_INET6) {
-		execve6_print(pname,
-			      exe_path, data->argv,
-			      tmp_stdin, tmp_stdout,
-			      &dip6, dport, &sip6, sport,
-			      pid_tree, tty_name, socket_pid,
-			      data->ssh_connection, data->ld_preload,
-			      rc);
-	}
-#endif
-    else {
-        execve_nosocket_print(pname,
-                              exe_path, data->argv,
-                              tmp_stdin, tmp_stdout,
-                              pid_tree, tty_name,
-                              data->ssh_connection, data->ld_preload,
-                              rc);
-    }
-
-out:
-    if (pname_buf)
-        smith_kfree(pname_buf);
-    if (stdin_buf)
-        smith_kfree(stdin_buf);
-    if (stdout_buf)
-        smith_kfree(stdout_buf);
-    if (pid_tree)
-        smith_kfree(pid_tree);
-    if (buffer)
-        smith_kfree(buffer);
-    if(tty)
-        tty_kref_put(tty);
-
-release_data:
-    if (data->free_argv)
-        smith_kfree(data->argv);
-    if (data->free_ld_preload)
-        smith_kfree(data->ld_preload);
-    if (data->free_ssh_connection)
-        smith_kfree(data->ssh_connection);
-
-    return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 0, 0)
-
-struct user_arg_ptr {
-#ifdef CONFIG_COMPAT
-	bool is_compat;
-#endif
-	union {
-		const char __user *const __user *native;
-#ifdef CONFIG_COMPAT
-		const compat_uptr_t __user *compat;
-#endif
-	} ptr;
-};
-
-static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
-{
-	const char __user *native;
-
-#ifdef CONFIG_COMPAT
-	if (argv.is_compat) {
-		compat_uptr_t compat;
-
-		if (smith_get_user(compat, argv.ptr.compat + nr))
-		    return ERR_PTR(-EFAULT);
-
-		return compat_ptr(compat);
-	}
-#endif
-
-	if (smith_get_user(native, argv.ptr.native + nr))
-	    return ERR_PTR(-EFAULT);
-
-	return native;
-}
-
-//count execve argv num
-static int execve_count_args(struct user_arg_ptr argv, int max)
-{
-	int i = 0;
-	if (argv.ptr.native != NULL) {
-		for (;;) {
-			const char __user *p = get_user_arg_ptr(argv, i);
-			if (!p)
-				break;
-			if (IS_ERR(p))
-				return -EFAULT;
-			if (++i >= max)
-				break;
-			if (fatal_signal_pending(current))
-				return -ERESTARTNOHAND;
-		}
-	}
-	return i;
-}
-
-//get execve syscall argv/LD_PRELOAD && SSH_CONNECTION env info
-static void get_execve_data(struct user_arg_ptr argv_ptr,
-                            struct user_arg_ptr env_ptr,
-		                    struct execve_data *data)
-{
-	int argv_len = 0, argv_res_len = 0, i = 0, len = 0, offset = 0;
-	int env_len = 0, free_argv = 0, res = 0;
-	int ssh_connection_flag = 0, ld_preload_flag = 0;
-	int free_ld_preload = 1, free_ssh_connection = 1;
-
-	char *argv_res = NULL;
-	char *ssh_connection = NULL;
-	char *ld_preload = NULL;
-	const char __user *native;
-
-	env_len = execve_count_args(env_ptr, MAX_ARG_STRINGS);
-	argv_len = execve_count_args(argv_ptr, SMITH_MAX_ARG_STRINGS);
-	argv_res_len = 256 * argv_len;
-
-	if (argv_len > 0) {
-		argv_res = smith_kmalloc(argv_res_len + 1, GFP_ATOMIC);
-		if (!argv_res) {
-			argv_res = "-1";
-		} else {
-			free_argv = 1;
-			for (i = 0; i < argv_len; i++) {
-				native = get_user_arg_ptr(argv_ptr, i);
-				if (IS_ERR(native))
-					continue;
-
-				len = smith_strnlen_user(native, MAX_ARG_STRLEN);
-				if (len <= 0)
-					continue;
-
-				if (offset + len > argv_res_len) {
-				    res = argv_res_len - offset;
-				    offset += res - smith_copy_from_user(argv_res + offset, native, res);
-				    break;
-				}
-
-				res = smith_copy_from_user(argv_res + offset, native, len);
-				offset += len - res;
-				if (res)
-					continue;
-				*(argv_res + offset - 1) = ' ';
-			}
-			if (offset > 0)
-				*(argv_res + offset) = '\0';
-			else
-				smith_strcpy(argv_res, "<FAIL>");
-			smith_strim(argv_res);
-		}
-	}
-
-	ssh_connection = smith_kmalloc(255, GFP_ATOMIC);
-	ld_preload = smith_kmalloc(255, GFP_ATOMIC);
-
-	if (!ssh_connection)
-		free_ssh_connection = 0;
-
-	if (!ld_preload)
-		free_ld_preload = 0;
-
-	//get SSH_CONNECTION and LD_PRELOAD env info
-	if (env_len > 0) {
-		char buf[256];
-		for (i = 0; i < env_len; i++) {
-			if (ld_preload_flag == 1 && ssh_connection_flag == 1)
-				break;
-
-			native = get_user_arg_ptr(env_ptr, i);
-			if (IS_ERR(native))
-				continue;
-
-			len = smith_strnlen_user(native, MAX_ARG_STRLEN);
-			if (len > 14 && len < 256) {
-				memset(buf, 0, 256);
-				if (smith_copy_from_user(buf, native, len))
-					break;
-				else {
-					if (strncmp("SSH_CONNECTION=", buf, 11) == 0) {
-					    ssh_connection_flag = 1;
-						if (free_ssh_connection == 1) {
-							smith_strcpy(ssh_connection, buf + 15);
-						} else {
-							ssh_connection = "-1";
-						}
-					} else if (strncmp("LD_PRELOAD=", buf, 11) == 0) {
-					    ld_preload_flag = 1;
-						if (free_ld_preload == 1) {
-							smith_strcpy(ld_preload, buf + 11);
-						} else {
-							ld_preload = "-1";
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if (ssh_connection_flag == 0) {
-		if (free_ssh_connection == 0)
-			ssh_connection = "-1";
-		else
-			smith_strcpy(ssh_connection, "-1");
-	}
-	data->ssh_connection = ssh_connection;
-	data->free_ssh_connection = free_ssh_connection;
-
-	if (ld_preload_flag == 0) {
-		if (free_ld_preload == 0)
-			ld_preload = "-1";
-		else
-			smith_strcpy(ld_preload, "-1");
-	}
-	data->ld_preload = ld_preload;
-	data->free_ld_preload = free_ld_preload;
-
-	data->argv = argv_res;
-	data->len_argv = argv_res ? strlen(argv_res) : 0;
-	data->free_argv = free_argv;
-}
-
-#ifdef CONFIG_COMPAT
-static int compat_execve_entry_handler(
-                  struct kretprobe_instance *ri,
-			      struct pt_regs *regs)
-{
-	struct user_arg_ptr argv_ptr;
-	struct user_arg_ptr env_ptr;
-	struct execve_data *data;
-	data = (struct execve_data *)ri->data;
-
-    memset(&argv_ptr, 0, sizeof(argv_ptr));
-    memset(&env_ptr, 0, sizeof(env_ptr));
-
-	argv_ptr.is_compat = true;
-	argv_ptr.ptr.compat = (const compat_uptr_t __user *)p_get_arg2_syscall(regs);
-
-	env_ptr.is_compat = true;
-	env_ptr.ptr.compat = (const compat_uptr_t __user *)p_get_arg3_syscall(regs);
-
-	get_execve_data(argv_ptr, env_ptr, data);
-	return 0;
-}
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-#ifdef CONFIG_COMPAT
-static int compat_execveat_entry_handler(
-                struct kretprobe_instance *ri,
-				struct pt_regs *regs)
-{
-	struct user_arg_ptr argv_ptr;
-	struct user_arg_ptr env_ptr;
-	struct execve_data *data;
-	data = (struct execve_data *)ri->data;
-
-    memset(&argv_ptr, 0, sizeof(argv_ptr));
-    memset(&env_ptr, 0, sizeof(env_ptr));
-
-	argv_ptr.is_compat = true;
-	argv_ptr.ptr.compat = (const compat_uptr_t __user *)p_get_arg3_syscall(regs);
-
-	env_ptr.is_compat = true;
-	env_ptr.ptr.compat = (const compat_uptr_t __user *)p_get_arg4_syscall(regs);
-
-	get_execve_data(argv_ptr, env_ptr, data);
-	return 0;
-}
-#endif
-
-static int execveat_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-	struct user_arg_ptr argv_ptr;
-	struct user_arg_ptr env_ptr;
-	struct execve_data *data;
-	data = (struct execve_data *)ri->data;
-
-    memset(&argv_ptr, 0, sizeof(argv_ptr));
-    memset(&env_ptr, 0, sizeof(env_ptr));
-
-	argv_ptr.ptr.native = (const char *const *)p_get_arg3_syscall(regs);
-	env_ptr.ptr.native = (const char *const *)p_get_arg4_syscall(regs);
-
-	get_execve_data(argv_ptr, env_ptr, data);
-	return 0;
-}
-#endif
-
-static int execve_entry_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
-{
-	struct user_arg_ptr argv_ptr;
-	struct user_arg_ptr env_ptr;
-	struct execve_data *data;
-	data = (struct execve_data *)ri->data;
-
-    memset(&argv_ptr, 0, sizeof(argv_ptr));
-    memset(&env_ptr, 0, sizeof(env_ptr));
-
-	argv_ptr.ptr.native = (const char *const *)p_get_arg2_syscall(regs);
-	env_ptr.ptr.native = (const char *const *)p_get_arg3_syscall(regs);
-
-	get_execve_data(argv_ptr, env_ptr, data);
-	return 0;
-}
-
-#else
-
-//count execve argv num
-static int execve_count(char __user * __user * argv, int max)
-{
-    int i = 0;
-
-    if (argv != NULL) {
-        for (;;) {
-            char __user *p;
-            if (smith_get_user(p, argv))
-                return -EFAULT;
-            if (!p)
-                break;
-            argv++;
-            if (++i >= max)
-                break;
-            if (fatal_signal_pending(current))
-                return -ERESTARTNOHAND;
-        }
-    }
-    return i;
-}
-
-//get execve syscall argv/LD_PRELOAD && SSH_CONNECTION env info
-static void get_execve_data(char **argv, char **env, struct execve_data *data)
-{
-    int argv_len = 0, argv_res_len = 0, i = 0, len = 0, offset = 0, res = 0;
-    int env_len = 0, free_argv = 0, ssh_connection_flag = 0, ld_preload_flag = 0;
-    int free_ssh_connection = 1, free_ld_preload = 1;
-
-    char *argv_res = NULL;
-    char *ssh_connection = NULL;
-    char *ld_preload = NULL;
-    const char __user * native;
-
-    env_len = execve_count(env, MAX_ARG_STRINGS);
-    argv_len = execve_count(argv, SMITH_MAX_ARG_STRINGS);
-    argv_res_len = 256 * argv_len;
-
-    //get execve args data
-    if (argv_len > 0) {
-        argv_res = smith_kmalloc(argv_res_len + 1, GFP_ATOMIC);
-        if (!argv_res) {
-            argv_res = "-1";
-        } else {
-            free_argv = 1;
-            for (i = 0; i < argv_len; i++) {
-                if (smith_get_user(native, argv + i))
-                    continue;
-
-                len = smith_strnlen_user(native, MAX_ARG_STRLEN);
-                if (len <= 0)
-                    continue;
-
-                if (offset + len > argv_res_len) {
-                    res = argv_res_len - offset;
-                    offset += res - smith_copy_from_user(argv_res + offset, native, res);
-                    break;
-                }
-
-                res = smith_copy_from_user(argv_res + offset, native, len);
-                offset += len - res;
-                if (res)
-                    continue;
-                *(argv_res + offset - 1) = ' ';
-            }
-            if (offset > 0)
-                *(argv_res + offset) = '\0';
-            else
-                smith_strcpy(argv_res, "<FAIL>");
-            smith_strim(argv_res);
-        }
-    }
-
-    ssh_connection = smith_kmalloc(255, GFP_ATOMIC);
-    ld_preload = smith_kmalloc(255, GFP_ATOMIC);
-
-    if (!ssh_connection)
-        free_ssh_connection = 0;
-
-    if (!ld_preload)
-        free_ld_preload = 0;
-
-    //get SSH_CONNECTION and LD_PRELOAD env info
-    if (env_len > 0) {
-        char buf[256];
-        for (i = 0; i < argv_len; i++) {
-            if (ld_preload_flag == 1 && ssh_connection_flag == 1)
-                break;
-
-            if (smith_get_user(native, env + i))
-                break;
-
-            len = smith_strnlen_user(native, MAX_ARG_STRLEN);
-            if (len <= 0 || len > MAX_ARG_STRLEN)
-                break;
-
-            if (len > 14 && len < 256) {
-                memset(buf, 0, 256);
-                if (smith_copy_from_user(buf, native, len))
-                    break;
-                else {
-                    if (strncmp("SSH_CONNECTION=", buf, 11) == 0) {
-                        ssh_connection_flag = 1;
-                        if (free_ssh_connection == 1) {
-                            smith_strcpy(ssh_connection, buf + 15);
-                        } else {
-                            ssh_connection = "-1";
-                        }
-                    } else if (strncmp("LD_PRELOAD=", buf, 11) == 0) {
-                        ld_preload_flag = 1;
-                        if (free_ld_preload == 1) {
-                            smith_strcpy(ld_preload, buf + 11);
-                        } else {
-                            ld_preload = "-1";
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (ssh_connection_flag == 0) {
-        if (free_ssh_connection == 0)
-            ssh_connection = "-1";
-        else
-            smith_strcpy(ssh_connection, "-1");
-    }
-    data->ssh_connection = ssh_connection;
-    data->free_ssh_connection = free_ssh_connection;
-
-    if (ld_preload_flag == 0) {
-        if (free_ld_preload == 0)
-            ld_preload = "-1";
-        else
-            smith_strcpy(ld_preload, "-1");
-    }
-    data->ld_preload = ld_preload;
-    data->free_ld_preload = free_ld_preload;
-
-    data->argv = argv_res;
-    data->len_argv = argv_res ? strlen(argv_res) : 0;
-    data->free_argv = free_argv;
-}
-
-static int compat_execve_entry_handler(
-                              struct kretprobe_instance *ri,
-                              struct pt_regs *regs)
-{
-    struct execve_data *data;
-    char **argv = (char **)p_get_arg2_syscall(regs);
-    char **env = (char **)p_get_arg3_syscall(regs);
-
-    data = (struct execve_data *)ri->data;
-    get_execve_data(argv, env, data);
-    return 0;
-}
-
-static int execve_entry_handler(struct kretprobe_instance *ri,
-                                struct pt_regs *regs)
-{
-    struct execve_data *data;
-    char **argv = (char **)p_get_arg2_syscall(regs);
-    char **env = (char **)p_get_arg3_syscall(regs);
-    data = (struct execve_data *)ri->data;
-    get_execve_data(argv, env, data);
-    return 0;
-}
-
-#endif
-
-//get create file info
-static int security_inode_create_pre_handler(struct kprobe *p, struct pt_regs *regs)
-{
-    int sa_family = -1;
-    int dport = 0, sport = 0;
-
-    __be32 dip4;
-    __be32 sip4;
-    pid_t socket_pid = -1;
-
-    char *pname_buf = NULL;
-    char *buffer = NULL;
-    char *pathstr = DEFAULT_RET_STR;
-    char *exe_path = DEFAULT_RET_STR;
-    char *s_id = DEFAULT_RET_STR;
-
-    struct dentry * file = NULL;
-    struct in6_addr dip6;
-    struct in6_addr sip6;
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-
-    //exe filter check
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out;
-
-    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    if (pname_buf) {
-        file = (struct dentry *)p_regs_get_arg2(regs);
-        if (IS_ERR_OR_NULL(file)) {
-            smith_kfree(pname_buf);
-            goto out;
-        }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
-        pathstr = dentry_path_raw(file, pname_buf, PATH_MAX);
-#else
-        pathstr = smith_dentry_path(file, pname_buf, PATH_MAX);
-#endif
-
-        if(!IS_ERR_OR_NULL(file->d_sb))
-            s_id = file->d_sb->s_id;
-
-        if(IS_ERR(pathstr))
-            pathstr = NAME_TOO_LONG;
-    }
-
-    get_process_socket(&sip4, &sip6, &sport, &dip4, &dip6, &dport,
-                       &socket_pid, &sa_family);
-
-    if (sa_family == AF_INET) {
-        security_inode4_create_print(exe_path, pathstr,
-                                    dip4, dport, sip4, sport,
-                                    socket_pid, s_id);
-    }
-#if IS_ENABLED(CONFIG_IPV6)
-    else if (sa_family == AF_INET6) {
-		security_inode6_create_print(exe_path, pathstr, &dip6,
-                                     dport, &sip6, sport,
-			                         socket_pid, s_id);
-	}
-#endif
-    else {
-        security_inode_create_nosocket_print(exe_path, pathstr, s_id);
-    }
-
-    if (pname_buf)
-        smith_kfree(pname_buf);
-
-out:
-    if (buffer)
-        smith_kfree(buffer);
-
-    return 0;
-}
-
-static int ptrace_pre_handler(struct kprobe *p, struct pt_regs *regs)
-{
-    long request;
-    request = (long)p_get_arg1_syscall(regs);
-
-    //only get PTRACE_POKETEXT/PTRACE_POKEDATA ptrace
-    //Read a word at the address addr in the tracee's memory,
-    //returning the word as the result of the ptrace() call.  Linux
-    //does not have separate text and data address spaces, so these
-    //two requests are currently equivalent.  (data is ignored; but
-    //see NOTES.)
-
-    if (request == PTRACE_POKETEXT || request == PTRACE_POKEDATA) {
-        long pid;
-        void *addr;
-        char *exe_path = DEFAULT_RET_STR;
-        char *buffer = NULL;
-        char *pid_tree = NULL;
-
-        pid = (long)p_get_arg2_syscall(regs);
-        addr = (void *)p_get_arg3_syscall(regs);
-
-        if (IS_ERR_OR_NULL(addr))
-            return 0;
-
-        buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-        exe_path = smith_get_exe_file(buffer, PATH_MAX);
-
-        pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
-        ptrace_print(request, pid, addr, "-1", exe_path, pid_tree);
-
-        if(buffer)
-            smith_kfree(buffer);
-
-        if(pid_tree)
-            smith_kfree(pid_tree);
-    }
-
-    return 0;
-}
-/*
- * ip address manipulation routines
- */
-
-struct smith_ip_addr {
-
-    int sa_family;
-    int sport;
-    int dport;
-
-    union {
-        struct {
-            __be32 dip4;
-            __be32 sip4;
-        };
-        struct {
-            struct in6_addr dip6;
-            struct in6_addr sip6;
-        };
-    };
-};
-
-static int smith_query_ip_addr(struct socket *sock, struct smith_ip_addr *addr)
+static int smith_query_ipinfo(struct sock *sk, struct smith_ipinfo *addr)
 {
     union {
         struct sockaddr    sa;
@@ -2094,16 +913,16 @@ static int smith_query_ip_addr(struct socket *sock, struct smith_ip_addr *addr)
         struct __kernel_sockaddr_storage kss;
     } sa;
 
-    if (AF_INET == sock->sk->sk_family) {
+    if (AF_INET == sk->sk_family) {
         addr->sa_family = AF_INET;
-        if (smith_get_sock_v4(sock, &sa.sa) >= 0) {
+        if (smith_get_sock_v4(sk, &sa.sa) >= 0) {
             addr->sport = ntohs(sa.si4.sin_port);
             addr->sip4 = sa.si4.sin_addr.s_addr;
         } else {
             addr->sport = 0;
             addr->sip4 = 0;
         }
-        if (smith_get_peer_v4(sock, &sa.sa) >= 0) {
+        if (smith_get_peer_v4(sk, &sa.sa) >= 0) {
             addr->dport = ntohs(sa.si4.sin_port);
             addr->dip4 = sa.si4.sin_addr.s_addr;
         } else {
@@ -2111,16 +930,16 @@ static int smith_query_ip_addr(struct socket *sock, struct smith_ip_addr *addr)
             addr->dip4 = 0;
         }
 #if IS_ENABLED(CONFIG_IPV6)
-    } else if (AF_INET6 == sock->sk->sk_family) {
+    } else if (AF_INET6 == sk->sk_family) {
         addr->sa_family = AF_INET6;
-        if (smith_get_sock_v6(sock, &sa.sa) >= 0) {
+        if (smith_get_sock_v6(sk, &sa.sa) >= 0) {
             addr->sport = ntohs(sa.si6.sin6_port);
             memcpy(&addr->sip6, &sa.si6.sin6_addr, sizeof(struct in6_addr));
         } else {
             addr->sport = 0;
             memset(&addr->sip6, 0, sizeof(struct in6_addr));
         }
-        if (smith_get_peer_v6(sock, &sa.sa) >= 0) {
+        if (smith_get_peer_v6(sk, &sa.sa) >= 0) {
             addr->dport = ntohs(sa.si6.sin6_port);
             memcpy(&addr->dip6, &sa.si6.sin6_addr, sizeof(struct in6_addr));
         } else {
@@ -2135,34 +954,1059 @@ static int smith_query_ip_addr(struct socket *sock, struct smith_ip_addr *addr)
     return addr->sa_family;
 }
 
+//get task tree first AF_INET/AF_INET6 socket info
+static void get_process_socket(struct smith_ipinfo *ip, pid_t *socket_pid)
+{
+    struct task_struct *task = current;
+    int it = 0, socket_check = 0;
+
+    get_task_struct(task);
+
+    while (task && task->pid != 1 && it++ < EXECVE_GET_SOCK_PID_LIMIT) {
+        struct task_struct *old_task;
+        struct files_struct *files;
+        unsigned int i;
+
+        files = smith_get_files_struct(task);
+        if (!files)
+            goto next_task;
+
+        for (i = 0; i < EXECVE_GET_SOCK_FD_LIMIT; i++) {
+            struct socket *socket;
+            int err = 0;
+
+            rcu_read_lock();
+            /* move to next if exceeding current task's max_fds,
+               max_fds access should be protected by rcu lock */
+            if (i >= files_fdtable(files)->max_fds) {
+                rcu_read_unlock();
+                break;
+            }
+            socket = sockfd_lookup(i, &err);
+            rcu_read_unlock();
+
+            if (!IS_ERR_OR_NULL(socket)) {
+                /* only process known states: SS_CONNECTING/SS_CONNECTED/SS_DISCONNECTING,
+                   SS_FREE/SS_UNCONNECTED or any possible new states are to be skipped */
+                if ((socket->state == SS_CONNECTING ||
+                     socket->state == SS_CONNECTED ||
+                     socket->state == SS_DISCONNECTING) && socket->sk) {
+
+                    smith_query_ipinfo(socket->sk, ip);
+                    socket_check = 1;
+                }
+                smith_sockfd_put(socket);
+            }
+        }
+        if (task == current)
+            put_files_struct_sym(files);
+        else
+            smith_put_files_struct(files);
+
+        if (socket_check) {
+            *socket_pid = task->tgid;
+            smith_put_task_struct(task);
+            return;
+        }
+
+next_task:
+        old_task = task;
+        rcu_read_lock();
+        task = smith_get_task_struct(rcu_dereference(task->real_parent));
+        rcu_read_unlock();
+        smith_put_task_struct(old_task);
+    }
+
+    if (task)
+        smith_put_task_struct(task);
+
+    return;
+}
+
+static void smith_trace_sysret_bind(long sockfd, long ret)
+{
+    struct socket *sock = NULL;
+    struct smith_ipinfo ip;
+    int err = 0;
+
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
+    struct smith_tid *tid = NULL;
+
+    /* ignore failed bind calls */
+    if (ret != 0)
+        goto out;
+
+    sock = sockfd_lookup(sockfd, &err);
+    if (IS_ERR_OR_NULL(sock))
+        goto out;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    smith_query_ipinfo(sock->sk, &ip);
+    if (AF_INET == ip.sa_family) {
+        bind4_print(exe_path, ip.sip4, ip.sport, sockfd, pid_tree);
+#if IS_ENABLED(CONFIG_IPV6)
+    } else if (AF_INET6 == ip.sa_family) {
+        bind6_print(exe_path, &ip.sip6, ip.sport, sockfd, pid_tree);
+#endif
+    }
+
+out:
+    if (!IS_ERR_OR_NULL(sock))
+        smith_sockfd_put(sock);
+    if (tid)
+        smith_put_tid(tid);
+}
+
+
+/*************************************
+ *    LRU list for tcp connections   *
+ *************************************/
+
 /*
- * DNS query hooking
+ * rbtree defs for tcp connect record
  */
+static struct tt_rb g_rb_conn;  /* rbtree of cached conns */
+static LIST_HEAD(g_lru_conn);   /* lru list of cached conns */
+
+#define SMITH_CONN_REAPER (150)       /* 150 seconds */
+#define SMITH_CONN_MAX    (1UL << 16) /* max conn records */
+
+static struct tt_node *smith_init_conn(struct tt_rb *rb, void *key)
+{
+    struct tt_node *node = key;
+    struct smith_conn *conn, *obj;
+    struct smith_tid *tid;
+
+    tid = smith_lookup_tid(current);
+    if (!tid)
+        return NULL;
+
+    conn = (struct smith_conn *)tt_rb_alloc_node(rb);
+    if (!conn) {
+        smith_put_tid(tid);
+        return NULL;
+    }
+
+    /* initialize file entry */
+    obj = container_of(node, struct smith_conn, sc_node);
+    obj->sc_node.flags |= conn->sc_node.flags;
+    *conn = *obj; /* sc_node.flags should be included */
+    conn->sc_tid = tid;
+    INIT_LIST_HEAD(&conn->sc_link);
+    atomic_set(&conn->sc_node.refs, 0);
+    return &conn->sc_node;
+}
+
+static int smith_cmp_conn(struct tt_rb *rb, struct tt_node *tnod, void *key)
+{
+    struct tt_node *node = key;
+    struct smith_conn *conn1, *conn2;
+
+    conn1 = container_of(tnod, struct smith_conn, sc_node);
+    conn2 = container_of(node, struct smith_conn, sc_node);
+    if (conn2->sc_sock > conn1->sc_sock)
+        return 1;
+    if (conn2->sc_sock < conn1->sc_sock)
+        return -1;
+    return 0;
+}
+
+static int smith_compare_conns(struct smith_conn *conn1, struct smith_conn *conn2)
+{
+    if (conn1->sc_tid != conn2->sc_tid)
+        return 1;
+    if (conn1->sc_pid != conn2->sc_pid)
+        return 1;
+    if (conn1->sc_pgid != conn2->sc_pgid)
+        return 2;
+    if (conn1->sc_node.flag_ipv6 != conn2->sc_node.flag_ipv6)
+        return 3;
+    if (conn1->sc_ip.sport != conn2->sc_ip.sport)
+        return 4;
+    if (conn1->sc_ip.dport != conn2->sc_ip.dport)
+        return 5;
+    if (conn1->sc_node.flag_ipv6) {
+        uint16_t *s1 = (uint16_t *)(&conn1->sc_ip.sip6);
+        uint16_t *d1 = (uint16_t *)(&conn1->sc_ip.dip6);
+        uint16_t *s2 = (uint16_t *)(&conn2->sc_ip.sip6);
+        uint16_t *d2 = (uint16_t *)(&conn2->sc_ip.dip6);
+        int i;
+        for (i = 0; i < 8; i++) {
+            if (s1[i] != s2[i])
+                return 6;
+            if (d1[i] != d2[i])
+                return 7;
+        }
+    } else {
+        if (conn1->sc_ip.sip4 != conn2->sc_ip.sip4)
+            return 6;
+        if (conn1->sc_ip.dip4 != conn2->sc_ip.dip4)
+            return 7;
+    }
+    return 0;
+}
+
+static void smith_release_conn(struct tt_rb *rb, struct tt_node *tnod)
+{
+    struct smith_conn *conn = container_of(tnod, struct smith_conn, sc_node);
+
+    list_del(&conn->sc_link);
+    if (conn->sc_tid)
+        smith_put_tid(conn->sc_tid);
+    conn->sc_tid = NULL;
+    tt_rb_free_node(rb, tnod);
+}
+
+
+static void smith_show_conn(struct tt_node *tnod)
+{
+    struct smith_conn *conn;
+
+    if (!tnod)
+        return;
+
+    conn = container_of(tnod, struct smith_conn, sc_node);
+    if (conn->sc_node.flag_ipv6) {
+        uint16_t *s = (uint16_t *)(&conn->sc_ip.sip6);
+        uint16_t *d = (uint16_t *)(&conn->sc_ip.dip6);
+        printk("%s (%u) delta: %u/%u %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d -> "
+                "%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d\n",
+                conn->sc_comm, conn->sc_tid->st_tgid, conn->sc_age, smith_get_delta(0),
+                ntohs(s[0]), ntohs(s[1]), ntohs(s[2]), ntohs(s[3]), ntohs(s[4]),
+                ntohs(s[5]), ntohs(s[6]), ntohs(s[7]), conn->sc_ip.sport,
+                ntohs(d[0]), ntohs(d[1]), ntohs(d[2]), ntohs(d[3]), ntohs(d[4]),
+                ntohs(d[5]), ntohs(d[6]), ntohs(d[7]), conn->sc_ip.dport);
+    } else {
+        uint8_t *s = (uint8_t *)(&conn->sc_ip.sip4);
+        uint8_t *d = (uint8_t *)(&conn->sc_ip.dip4);
+        printk("%s (%u) delta: %u/%u %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n",
+                conn->sc_comm, conn->sc_tid->st_tgid, conn->sc_age, smith_get_delta(0),
+                s[0], s[1], s[2], s[3], conn->sc_ip.sport,
+                d[0], d[1], d[2], d[3], conn->sc_ip.dport);
+    }
+}
+
+static void smith_log_conn(struct smith_conn *conn, int rc)
+{
+    struct smith_tid *tid = conn->sc_tid;
+    char *exe_path;
+
+    exe_path = tid->st_img->si_path;
+    if (conn->sc_node.flag_ipv6)
+        tcpconn6_print(conn, tid, exe_path, rc);
+    else
+        tcpconn4_print(conn, tid, exe_path, rc);
+}
+
+static int smith_drop_head_conn(void)
+{
+    struct list_head *link;
+    struct smith_conn *conn = NULL;
+    unsigned long flags;
+    int reaper = -1;
+
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    if (!list_empty(&g_lru_conn)) {
+        link = g_lru_conn.next;
+        conn = list_entry(link, struct smith_conn, sc_link);
+        if (smith_get_delta(0) >= conn->sc_age)
+            reaper++;
+    }
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+    if (reaper < 0)
+        goto errout;
+
+    write_lock_irqsave(&g_rb_conn.lock, flags);
+    while (!list_empty(&g_lru_conn)) {
+        link = g_lru_conn.next;
+        conn = list_entry(link, struct smith_conn, sc_link);
+        if (smith_get_delta(0) < conn->sc_age)
+            break;
+
+        smith_log_conn(conn, -ETIME);
+
+        /* remove entry from lru list */
+        list_del_init(&conn->sc_link);
+        /* this entry hasn't been touched for seconds */
+        /* so remove the entry from rbtree and drop it */
+        tt_rb_remove_node_nolock(&g_rb_conn, &conn->sc_node);
+        reaper++;
+    }
+    write_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+errout:
+    return reaper;
+}
+
+static struct smith_conn *smith_lookup_conn(struct sock *sk)
+{
+    struct smith_conn *conn;
+    struct tt_node *tnod;
+    struct smith_conn obj;
+
+    /* check whether the entry was already inserted ? */
+    memset(&obj, 0, sizeof(obj));
+    obj.sc_sock = sk;
+
+    tnod = tt_rb_lookup_nolock(&g_rb_conn, &obj);
+    if (tnod)
+        conn = container_of(tnod, struct smith_conn, sc_node);
+    else
+        conn = NULL;
+
+    return conn;
+}
+
+static int smith_insert_conn(struct smith_conn *obj)
+{
+    struct smith_conn *conn;
+    struct tt_node *tnod = NULL;
+    unsigned long flags;
+
+    /* check whether the entry was already inserted ? */
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_conn, obj);
+    if (tnod) {
+        conn = container_of(tnod, struct smith_conn, sc_node);
+        if (!smith_compare_conns(conn, obj)) {
+            read_unlock_irqrestore(&g_rb_conn.lock, flags);
+            goto out;
+        }
+    }
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+    /* insert new node to rbtree */
+    write_lock_irqsave(&g_rb_conn.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_conn, obj);
+    if (tnod) {
+        conn = container_of(tnod, struct smith_conn, sc_node);
+        if (!smith_compare_conns(conn, obj)) {
+            write_unlock_irqrestore(&g_rb_conn.lock, flags);
+            goto out;
+        }
+
+        /* socket resued, now mark connection stale */
+        smith_log_conn(conn, -ESTALE);
+
+        /* remove tnod from lru and rbtree */
+        list_del_init(&conn->sc_link);
+        tt_rb_remove_node_nolock(&g_rb_conn, tnod);
+    }
+
+    tnod = tt_rb_insert_key_nolock(&g_rb_conn, &obj->sc_node);
+    if (tnod) {
+        conn = container_of(tnod, struct smith_conn, sc_node);
+
+        /* remove ent from LRU if it's already LRUed */
+        list_del_init(&conn->sc_link);
+        conn->sc_age = smith_get_delta(SMITH_CONN_REAPER);
+        /* insert ent to the tail of LRU list */
+        list_add_tail(&conn->sc_link, &g_lru_conn);
+    }
+    write_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+    /* drop stale entries */
+    smith_drop_head_conn();
+
+out:
+    return (!!tnod);
+}
+
+static int smith_remove_conn(struct sock *sk)
+{
+    struct smith_conn obj, *conn;
+    struct tt_node *tnod = NULL;
+    unsigned long flags;
+
+    /* init conn obj */
+    memset(&obj, 0, sizeof(obj));
+    obj.sc_sock = sk;
+
+    /* check whether the entry was already inserted ? */
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_conn, &obj);
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+    if (!tnod)
+        goto out;
+
+    write_lock_irqsave(&g_rb_conn.lock, flags);
+    /* do 2nd search to assure it's in lru list */
+    tnod = tt_rb_lookup_nolock(&g_rb_conn, &obj);
+    if (tnod) {
+        conn = container_of(tnod, struct smith_conn, sc_node);
+        list_del_init(&conn->sc_link);
+        tt_rb_remove_node_nolock(&g_rb_conn, tnod);
+    }
+    write_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+out:
+    smith_drop_head_conn();
+    return (!!tnod);
+}
+
+static void smith_enum_conn(void)
+{
+    unsigned long flags;
+
+    printk("smith_enum_conn: pended connections (%u):\n",
+            atomic_read(&g_rb_conn.count));
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    tt_rb_enum(&g_rb_conn, smith_show_conn);
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+    printk("smith_enum_conn: done\n");
+}
+
+static void smith_enum_conn_lru(void)
+{
+    struct list_head *link;
+    struct smith_conn *conn;
+    unsigned long flags;
+
+    printk("enum all conns in lru (%d):\n", atomic_read(&g_rb_conn.count));
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    link = g_lru_conn.next;
+    while (link != &g_lru_conn) {
+        conn = list_entry(link, struct smith_conn, sc_link);
+        link = link->next;
+        smith_show_conn(&conn->sc_node);
+    }
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+}
+
+static int connect4_lru_cache_insert(struct sock *sk,
+                                     uint16_t dport, uint32_t dip,
+                                     uint16_t sport, uint32_t sip)
+{
+    struct smith_conn conn;
+
+    memset(&conn, 0, sizeof(struct smith_conn));
+    conn.sc_uid = __get_current_uid();
+    conn.sc_sid = __get_sid();
+    conn.sc_pid = current->pid;
+    conn.sc_ppid = current->real_parent->tgid;
+    conn.sc_pgid = __get_pgid();
+    memcpy(conn.sc_comm, current->comm, TASK_COMM_LEN);
+    memcpy(conn.sc_utsname, current->nsproxy->uts_ns->name.nodename, __NEW_UTS_LEN);
+    conn.sc_mntns = smith_query_mntns();
+    conn.sc_sock = sk;
+    conn.sc_ip.sport = sport;
+    conn.sc_ip.dport = dport;
+    conn.sc_ip.sip4 = sip;
+    conn.sc_ip.dip4 = dip;
+    return smith_insert_conn(&conn);
+}
+
+static int connect6_lru_cache_insert(struct sock *sk,
+                                     uint16_t dport, struct in6_addr *dip,
+                                     uint16_t sport, struct in6_addr *sip)
+{
+    struct smith_conn conn;
+
+    memset(&conn, 0, sizeof(struct smith_conn));
+    conn.sc_node.flag_ipv6 = 1;
+    conn.sc_flag_ipv6 = 1;
+    conn.sc_uid = __get_current_uid();
+    conn.sc_sid = __get_sid();
+    conn.sc_pid = current->pid;
+    conn.sc_ppid = current->real_parent->tgid;
+    conn.sc_pgid = __get_pgid();
+    memcpy(conn.sc_comm, current->comm, TASK_COMM_LEN);
+    memcpy(conn.sc_utsname, current->nsproxy->uts_ns->name.nodename, __NEW_UTS_LEN);
+    conn.sc_mntns = smith_query_mntns();
+    conn.sc_sock = sk;
+    conn.sc_ip.sport = sport;
+    conn.sc_ip.dport = dport;
+    conn.sc_ip.sip6 = *sip;
+    conn.sc_ip.dip6 = *dip;
+    return smith_insert_conn(&conn);
+}
+
+/*
+ * tcp connect hooking: tcp_finish_connect
+ *
+ * void tcp_finish_connect(struct sock *sk, struct sk_buff *skb);
+ */
+static int tcp_finish_connect_handler(struct kprobe *p, struct pt_regs *regs)
+{
+    struct smith_conn *conn;
+    struct sock *sk;
+    unsigned long flags;
+
+    sk = (void *)p_regs_get_arg1(regs);
+    if (IS_ERR_OR_NULL(sk))
+        return 0;
+
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    conn = smith_lookup_conn(sk);
+    if (!conn) {
+        read_unlock_irqrestore(&g_rb_conn.lock, flags);
+        return 0;
+    }
+    smith_query_ipinfo(sk, &conn->sc_ip);
+    smith_log_conn(conn, 0);
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+    smith_remove_conn(sk);
+    return 0;
+}
+
+static struct kprobe tcp_connect_kprobe = {
+    .symbol_name = "tcp_finish_connect",
+    .pre_handler = tcp_finish_connect_handler,
+};
+
+
+/* void inet_release(struct socket *sock) */
+
+static int inet_release_handler(struct kprobe *p, struct pt_regs *regs)
+{
+    struct smith_conn *conn;
+    struct socket *sock;
+    struct sock *sk;
+    unsigned long flags;
+
+    sock = (void *)p_regs_get_arg1(regs);
+    if (IS_ERR_OR_NULL(sock))
+        return 0;
+
+    sk = sock->sk;
+    if (!sk)
+        return 0;
+
+    read_lock_irqsave(&g_rb_conn.lock, flags);
+    conn = smith_lookup_conn(sk);
+    if (!conn) {
+        read_unlock_irqrestore(&g_rb_conn.lock, flags);
+        return 0;
+    }
+    smith_log_conn(conn, -ECONNABORTED);
+    read_unlock_irqrestore(&g_rb_conn.lock, flags);
+
+    smith_remove_conn(sk);
+    return 0;
+}
+
+static struct kprobe inet_release_kprobe = {
+    .symbol_name = "inet_release",
+    .pre_handler = inet_release_handler,
+};
+
+static int register_tcp_connect_kprobe(void)
+{
+    int ret;
+
+    ret = register_kprobe(&inet_release_kprobe);
+    if (ret)
+        return ret;
+
+    ret = register_kprobe(&tcp_connect_kprobe);
+    if (!ret) {
+        tcp_connect_kprobe_state = 0x1;
+    } else {
+        unregister_kprobe(&inet_release_kprobe);
+    }
+
+    return ret;
+}
+
+static void unregister_tcp_connect_kprobe(void)
+{
+    if (!tcp_connect_kprobe_state)
+        return;
+
+    unregister_kprobe(&inet_release_kprobe);
+    unregister_kprobe(&tcp_connect_kprobe);
+}
 
 /* whether socket connection is udp (dgram) ? */
-static int smith_socket_is_udp(struct socket *sock)
+static int smith_sock_is_udp(struct socket *sock)
 {
     return (sock && sock->sk && sock->sk->sk_protocol == IPPROTO_UDP);
 }
 
+static void smith_trace_sysret_connect(long sockfd, long saddr, int len, int retval)
+{
+    struct socket *sock = NULL;
+
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
+    struct smith_tid *tid = NULL;
+    struct smith_ipinfo ip;
+    int err = 0;
+
+    sock = sockfd_lookup(sockfd, &err);
+    if (IS_ERR_OR_NULL(sock))
+        goto out;
+
+    /* we only care tcp connect requests */
+    if (smith_sock_is_udp(sock))
+        goto out;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    smith_query_ipinfo(sock->sk, &ip);
+    if (ip.sa_family == AF_INET) {
+        if (TCPCONN_HOOK && retval == -EINPROGRESS)
+            err = connect4_lru_cache_insert(sock->sk, ip.dport, ip.dip4, ip.sip4, ip.sport);
+        if (!err)
+            connect4_print(ip.dport, ip.dip4, exe_path, ip.sip4, ip.sport, retval, pid_tree);
+#if IS_ENABLED(CONFIG_IPV6)
+    } else if (ip.sa_family == AF_INET6) {
+        if (TCPCONN_HOOK && retval == -EINPROGRESS)
+            err = connect6_lru_cache_insert(sock->sk, ip.dport, &ip.dip6, ip.sport, &ip.sip6);
+        if (!err)
+            connect6_print(ip.dport, &ip.dip6, exe_path, &ip.sip6, ip.sport, retval, pid_tree);
+#endif
+    }
+
+out:
+    if (!IS_ERR_OR_NULL(sock))
+        smith_sockfd_put(sock);
+    if (tid)
+        smith_put_tid(tid);
+
+    return;
+}
+
+static void smith_trace_sysret_accept(long sockfd)
+{
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
+    struct socket *sock = NULL;
+    struct smith_ipinfo ip;
+    int err;
+
+    sock = sockfd_lookup(sockfd, &err);
+    if (IS_ERR_OR_NULL(sock))
+        goto out;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
+    smith_query_ipinfo(sock->sk, &ip);
+    if (AF_INET == ip.sa_family) {
+        accept_print(ip.dport, ip.dip4, exe_path, ip.sip4, ip.sport, sockfd);
+        // printk("accept4_handler: %d.%d.%d.%d/%d -> %d.%d.%d.%d/%d rc=%d\n",
+        //         NIPQUAD(sip4), sport, NIPQUAD(dip4), dport, sockfd);
+#if IS_ENABLED(CONFIG_IPV6)
+    } else if (AF_INET6 == ip.sa_family) {
+        accept6_print(ip.dport, &ip.dip6, exe_path, &ip.sip6, ip.sport, sockfd);
+        // printk("accept6_handler: %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d"
+        //        " -> %04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x/%d rc=%d\n",
+        //         NIP6(*sip6), sport, NIP6(dip6), dport, sockfd);
+#endif
+    }
+
+out:
+    if (!IS_ERR_OR_NULL(sock))
+        smith_sockfd_put(sock);
+    if (tid)
+        smith_put_tid(tid);
+}
+
+/*
+ * support routines for execve/execveat tracepoints
+ */
+
+struct execve_data {
+    char *argv;
+    char *env;
+    char *ssh_connection;
+    char *ld_preload;
+    char *ld_library_path;
+    int  len_argv;
+};
+
+static int smith_trace_process_exec(struct execve_data *data, int rc)
+{
+    struct smith_ipinfo ip;
+    char md5s[36] = "-1";
+    uint64_t size = 0;
+
+    char *pname = DEFAULT_RET_STR;
+    char *tmp_stdin = DEFAULT_RET_STR;
+    char *tmp_stdout = DEFAULT_RET_STR;
+    char *pname_buf = NULL;
+    char *pid_tree = NULL;
+    char *tty_name = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
+    struct smith_img *img = NULL;
+    char *stdin_buf = NULL;
+    char *stdout_buf = NULL;
+
+    struct file *file;
+    struct tty_struct *tty = NULL;
+
+    pid_t socket_pid = -1;
+    int i;
+
+    // argv filter check
+    if (g_flt_ops.argv_check(data->argv, data->len_argv))
+        goto out;
+
+    tty = get_current_tty();
+    if (tty && strlen(tty->name) > 0)
+        tty_name = tty->name;;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+
+        exe_path = tid->st_img->si_path;
+        pid_tree = tid->st_pid_tree;
+
+         /* decode md5 hash to string */
+        for (i = 0; i < 16; i++)
+            sprintf(&md5s[i * 2], "%2.2x", tid->st_img->si_md5.hash.v8[i]);
+        size = tid->st_img->si_md5.size;
+    } else {
+        img = smith_find_task_img(current);
+        if (img) {
+            // exe filter check
+            if (smith_is_exe_trusted(img))
+                goto out;
+            exe_path = img->si_path;
+        }
+    }
+
+    get_process_socket(&ip, &socket_pid);
+
+    // if socket exist,get pid tree
+    if (ip.sa_family == AF_INET6 || ip.sa_family == AF_INET)
+        smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
+    else
+        smith_check_privilege_escalation(PID_TREE_LIMIT_LOW, pid_tree);
+
+    // get stdin
+    file = smith_fget_raw(0);
+    if (file) {
+        stdin_buf = smith_kzalloc(256, GFP_ATOMIC);
+        tmp_stdin = smith_d_path(&(file->f_path), stdin_buf, 256);
+        smith_fput(file);
+    }
+
+    // get stdout
+    file = smith_fget_raw(1);
+    if (file) {
+        stdout_buf = smith_kzalloc(256, GFP_ATOMIC);
+        tmp_stdout = smith_d_path(&(file->f_path), stdout_buf, 256);
+        smith_fput(file);
+    }
+
+    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
+
+    if (ip.sa_family == AF_INET) {
+        execve_print(pname,
+                    exe_path, data->argv,
+                    tmp_stdin, tmp_stdout,
+                    ip.dip4, ip.dport,
+                    ip.sip4, ip.sport,
+                    pid_tree, tty_name, socket_pid,
+                    data->ssh_connection,
+                    data->ld_preload,
+                    data->ld_library_path,
+                    rc, size, md5s);
+#if IS_ENABLED(CONFIG_IPV6)
+    } else if (ip.sa_family == AF_INET6) {
+        execve6_print(pname,
+                    exe_path, data->argv,
+                    tmp_stdin, tmp_stdout,
+                    &ip.dip6, ip.dport,
+                    &ip.sip6, ip.sport,
+                    pid_tree, tty_name, socket_pid,
+                    data->ssh_connection,
+                    data->ld_preload,
+                    data->ld_library_path,
+                    rc, size, md5s);
+#endif
+    } else {
+        execve_nosocket_print(pname,
+                    exe_path, data->argv,
+                    tmp_stdin, tmp_stdout,
+                    pid_tree, tty_name,
+                    data->ssh_connection,
+                    data->ld_preload,
+                    data->ld_library_path,
+                    rc, size, md5s);
+    }
+
+out:
+    if (pname_buf)
+        smith_kfree(pname_buf);
+    if (stdin_buf)
+        smith_kfree(stdin_buf);
+    if (stdout_buf)
+        smith_kfree(stdout_buf);
+    if (tty)
+        tty_kref_put(tty);
+    if (img)
+        smith_put_img(img);
+    if (tid)
+        smith_put_tid(tid);
+
+    if (data->argv)
+        smith_kfree(data->argv);
+    if (data->env)
+        smith_kfree(data->env);
+
+    return 0;
+}
+
+//get execve syscall argv/LD_PRELOAD && SSH_CONNECTION && LD_LIB_PATH env info
+static void smith_trace_prepare_exec(struct execve_data *data)
+{
+    struct task_struct *task = current;
+    unsigned long args, envs, larg, lenv, i;
+    char *parg, *penv;
+
+    /* query arg and env mmap sections */
+    if (!task->mm)
+        return;
+    task_lock(task);
+    args = task->mm->arg_start;
+    if (task->mm->arg_end > args)
+        larg = task->mm->arg_end - args;
+    else
+        larg = 0;
+    envs = task->mm->env_start;
+    if (task->mm->env_end > envs)
+        lenv = task->mm->env_end - envs;
+    else
+        lenv = 0;
+    task_unlock(task);
+
+    /* query argv of current task */
+    if (larg > SMITH_MAX_CMDLINE)
+        larg = SMITH_MAX_CMDLINE;
+    if (!larg || !args)
+        goto proc_env;
+    parg = smith_kzalloc(larg < 16 ? 16 : larg, GFP_ATOMIC);
+    if (!parg)
+        goto proc_env;
+    i = larg - 1 - smith_copy_from_user(parg, (void *)args, larg - 1);
+    if (i == 0 || i >= larg) {
+        smith_kfree(parg);
+    } else {
+        unsigned long j = 0;
+        while(j < i) {
+            if (!parg[j])
+                parg[j] = ' ';
+            j++;
+        }
+        parg[i] = 0;
+        data->argv= smith_strim(parg, i);
+        data->len_argv = strlen(data->argv);
+    }
+
+proc_env:
+
+    /* query envion of current task, maxlen of env could be ARG_MAX or 32 pages */
+    if (lenv > PAGE_SIZE * 4)
+        lenv = PAGE_SIZE * 4;
+    if (lenv < 16 || !envs)
+        goto errorout;
+    penv = smith_kzalloc(lenv, GFP_ATOMIC);
+    if (!penv)
+        goto errorout;
+    data->env = penv;
+    if (smith_copy_from_user(penv, (void *)envs, lenv - 1)) {
+        if (!strlen(penv))
+            goto errorout;
+    }
+
+    data->ssh_connection = strnstr(penv, "SSH_CONNECTION=", lenv);
+    if (data->ssh_connection)
+        data->ssh_connection += 15;
+    data->ld_preload = strnstr(penv, "LD_PRELOAD=", lenv);
+    if (data->ld_preload)
+        data->ld_preload += 11;
+    data->ld_library_path = strnstr(penv, "LD_LIBRARY_PATH=", lenv);
+    if (data->ld_library_path)
+        data->ld_library_path += 16;
+
+errorout:
+
+    return;
+}
+
+static void smith_trace_sysret_exec(int rc)
+{
+    struct execve_data data = {0};
+
+    /* ignore the failures that target doesn't exist */
+    if (rc == -ENOENT)
+        return;
+
+    /* prepare data: args & environment elements */
+    smith_trace_prepare_exec(&data);
+
+    /* process execve and generate tracelog */
+    smith_trace_process_exec(&data, rc);
+}
+
+//get create file info
+static int
+security_inode_create_pre_handler(struct kprobe *p, struct pt_regs *regs)
+{
+    char *pname_buf = NULL;
+    struct smith_tid *tid = NULL;
+    char *pathstr = DEFAULT_RET_STR;
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
+    char *s_id = NULL;
+
+    struct dentry *de = NULL;
+    struct smith_ipinfo ip;
+    pid_t socket_pid = -1;
+    umode_t mode;
+
+    mode = (umode_t)p_regs_get_arg3(regs);
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    if (pname_buf) {
+        de = (struct dentry *)p_regs_get_arg2(regs);
+        if (IS_ERR_OR_NULL(de))
+            goto out;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
+        pathstr = dentry_path_raw(de, pname_buf, PATH_MAX);
+#else
+        pathstr = __dentry_path(de, pname_buf, PATH_MAX);
+#endif
+
+        if(!IS_ERR_OR_NULL(de->d_sb))
+            s_id = de->d_sb->s_id;
+
+        if(IS_ERR(pathstr)) {
+            pathstr = NAME_TOO_LONG;
+        } else if (S_ISREG(mode)) {
+            /* don't report files in /systemd/ */
+            if (!memcmp(pathstr, "/systemd/", 9))
+                goto out;
+            smith_insert_ent(pathstr);
+        }
+    }
+
+    get_process_socket(&ip, &socket_pid);
+
+    if (ip.sa_family == AF_INET) {
+        security_inode4_create_print(exe_path, pathstr, ip.dip4,
+                                    ip.dport, ip.sip4, ip.sport,
+                                    socket_pid, s_id, pid_tree);
+    }
+#if IS_ENABLED(CONFIG_IPV6)
+    else if (ip.sa_family == AF_INET6) {
+		security_inode6_create_print(exe_path, pathstr, &ip.dip6,
+                                     ip.dport, &ip.sip6, ip.sport,
+			                         socket_pid, s_id, pid_tree);
+	}
+#endif
+    else {
+        security_inode_create_nosocket_print(exe_path, pathstr,
+                                             s_id, pid_tree);
+    }
+
+out:
+    if (pname_buf)
+        smith_kfree(pname_buf);
+    if (tid)
+        smith_put_tid(tid);
+
+    return 0;
+}
+
+static void smith_trace_sysret_ptrace(long request, long pid, void *addr, long ret)
+{
+    struct smith_tid *tid = NULL;
+
+    // only get PTRACE_POKETEXT/PTRACE_POKEDATA ptrace
+    // Read a word at the address addr in the tracee's memory,
+    // returning the word as the result of the ptrace() call.  Linux
+    // does not have separate text and data address spaces, so these
+    // two requests are currently equivalent.  (data is ignored; but
+    // see NOTES.)
+
+    if (request == PTRACE_POKETEXT || request == PTRACE_POKEDATA) {
+        char *exe_path = DEFAULT_RET_STR;
+        char *pid_tree = NULL;
+
+        if (IS_ERR_OR_NULL(addr))
+            return;
+
+        tid = smith_lookup_tid(current);
+        if (tid) {
+            exe_path = tid->st_img->si_path;
+            // exe filter check
+            if (smith_is_exe_trusted(tid->st_img))
+                goto out;
+            pid_tree = tid->st_pid_tree;
+        }
+
+        smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
+        ptrace_print(request, pid, addr, "-1", exe_path, pid_tree);
+    }
+
+out:
+    if (tid)
+        smith_put_tid(tid);
+}
+
+
+/*
+ * DNS query hooking
+ */
+
 static void dns_data_transport(char *query, __be32 dip, __be32 sip, int dport,
                                int sport, int opcode, int rcode, int type)
 {
+    struct smith_tid *tid = NULL;
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    char *pid_tree = NULL;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        pid_tree = tid->st_pid_tree;
+    }
 
-    //exe filter check
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out;
+    dns_print(dport, dip, exe_path, sip, sport, opcode, rcode, query, type, pid_tree);
 
-    dns_print(dport, dip, exe_path, sip, sport, opcode, rcode, query);
-
-out:
-    if (buffer)
-        smith_kfree(buffer);
+    if (tid)
+        smith_put_tid(tid);
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
@@ -2170,21 +2014,20 @@ static void dns6_data_transport(char *query, struct in6_addr *dip,
                                 struct in6_addr *sip, int dport, int sport,
                                 int opcode, int rcode, int type)
 {
-	char *exe_path = DEFAULT_RET_STR;
-	char *buffer = NULL;
+    struct smith_tid *tid = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
 
-	buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-	exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        pid_tree = tid->st_pid_tree;
+    }
 
-	//exe filter check
-	if (execve_exe_check(exe_path, strlen(exe_path)))
-		goto out;
+    dns6_print(dport, dip, exe_path, sip, sport, opcode, rcode, query, type, pid_tree);
 
-	dns6_print(dport, dip, exe_path, sip, sport, opcode, rcode, query);
-
-out:
-	if (buffer)
-		smith_kfree(buffer);
+    if (tid)
+        smith_put_tid(tid);
 }
 #endif
 
@@ -2212,7 +2055,7 @@ static void *get_dns_query(unsigned char *data, int query_len, char *res, int *t
     return 0;
 }
 
-static int smith_process_dns(struct smith_ip_addr *addr, unsigned char *recv_data, int iov_len)
+static int smith_process_dns(struct smith_ipinfo *addr, unsigned char *recv_data, int iov_len)
 {
     // types of queries in the DNS system: https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml
     int qr, opcode = 0, rcode = 0, type = 0;
@@ -2296,7 +2139,7 @@ static void smith_check_dns_params(void)
 
 static int smith_is_dns_armed(struct smith_dns_threshold *sdt)
 {
-    uint64_t now = smith_get_seconds(), delta = now - sdt->start;
+    uint64_t now = smith_get_delta(0), delta = now - sdt->start;
 
     if (delta >= dns_intervals) {
 
@@ -2307,7 +2150,7 @@ static int smith_is_dns_armed(struct smith_dns_threshold *sdt)
         }
         /* reset timestamp for a refresh counting */
         atomic_set(&sdt->ops, 0);
-        WRITE_ONCE(sdt->start, smith_get_seconds());
+        WRITE_ONCE(sdt->start, smith_get_delta(0));
 
     } else {
 
@@ -2328,7 +2171,7 @@ static void smith_trace_sysret_recvdat(long sockfd, unsigned long userp, long le
 {
     struct socket *sock = NULL;
     unsigned char *data = NULL;
-    struct smith_ip_addr addr;
+    struct smith_ipinfo addr;
     int err;
 
     sock = sockfd_lookup(sockfd, &err);
@@ -2336,18 +2179,19 @@ static void smith_trace_sysret_recvdat(long sockfd, unsigned long userp, long le
         goto out;
 
     /* skip tcp connections */
-    if (!smith_socket_is_udp(sock))
+    if (!smith_sock_is_udp(sock))
         goto out;
 
     /* query ip addresses */
-    if (!smith_query_ip_addr(sock, &addr))
+    if (!smith_query_ipinfo(sock->sk, &addr))
         goto out;
 
     /* we only care IP v4 or v6 and port 53 or 5353 */
     if (addr.sa_family != AF_INET && addr.sa_family != AF_INET6)
         goto out;
     if (addr.sport != 53 && addr.sport != 5353 &&
-        addr.dport != 53 && addr.dport != 5353)
+        addr.dport != 53 && addr.dport != 5353 &&
+        addr.sport != 0 && addr.dport != 0)
         goto out;
 
     /* whether udp traffic of our interest goes high */
@@ -2369,7 +2213,7 @@ static void smith_trace_sysret_recvdat(long sockfd, unsigned long userp, long le
 
 out:
     if (!IS_ERR_OR_NULL(sock))
-        sockfd_put(sock);
+        smith_sockfd_put(sock);
     if (data)
         smith_kfree(data);
 }
@@ -2382,7 +2226,7 @@ static void smith_trace_sysret_recvmsg(long sockfd, unsigned long umsg, long len
 {
     struct socket *sock = NULL;
     unsigned char *data = NULL;
-    struct smith_ip_addr addr;
+    struct smith_ipinfo addr;
     struct user_msghdr msg;
     struct iovec iov = {0};
     int err;
@@ -2392,18 +2236,19 @@ static void smith_trace_sysret_recvmsg(long sockfd, unsigned long umsg, long len
         goto out;
 
     /* skip tcp connections */
-    if (!smith_socket_is_udp(sock))
+    if (!smith_sock_is_udp(sock))
         goto out;
 
     /* query ip addresses */
-    if (!smith_query_ip_addr(sock, &addr))
+    if (!smith_query_ipinfo(sock->sk, &addr))
         goto out;
 
     /* we only care IP v4 or v6 and port 53 or 5353 */
     if (addr.sa_family != AF_INET && addr.sa_family != AF_INET6)
         goto out;
     if (addr.sport != 53 && addr.sport != 5353 &&
-        addr.dport != 53 && addr.dport != 5353)
+        addr.dport != 53 && addr.dport != 5353 &&
+        addr.sport != 0 && addr.dport != 0)
         goto out;
 
     /* whether udp traffic of our interest goes high */
@@ -2436,544 +2281,10 @@ static void smith_trace_sysret_recvmsg(long sockfd, unsigned long umsg, long len
 
 out:
     if (!IS_ERR_OR_NULL(sock))
-        sockfd_put(sock);
+        smith_sockfd_put(sock);
     if (data)
         smith_kfree(data);
 }
-
-#include <linux/tracepoint.h>
-#include <linux/thread_info.h>
-#include <asm/syscall.h> /* syscall_get_nr() */
-#include <asm/unistd.h> /* __NR_syscall defintions */
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 35))
-    #define TRACEPOINT_PROBE_REGISTER(p1, p2) tracepoint_probe_register(p1, p2)
-    #define TRACEPOINT_PROBE_UNREGISTER(p1, p2) tracepoint_probe_unregister(p1, p2)
-    #define TRACEPOINT_PROBE(probe, args...) static void probe(args)
-#else
-    #define TRACEPOINT_PROBE_REGISTER(p1, p2) tracepoint_probe_register(p1, p2, NULL)
-    #define TRACEPOINT_PROBE_UNREGISTER(p1, p2) tracepoint_probe_unregister(p1, p2, NULL)
-    #define TRACEPOINT_PROBE(probe, args...) static void probe(void *__data, args)
-#endif
-
-#if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_IA32_EMULATION)
-
-/* only for x86 systems */
-static void smith_trace_sysexit_x86(struct pt_regs *regs, long id, long ret)
-{
-    switch (id) {
-
-        /*
-         * socket related
-         */
-
-        case 102 /* __NR_ia32_socketcall */:
-            if (CONNECT_HOOK && SYS_CONNECT == regs->bx) {
-            } else if (DNS_HOOK && ret >= 20 && (SYS_RECV == regs->bx ||
-                                                 SYS_RECVFROM == regs->bx ||
-                                                 SYS_RECVMSG == regs->bx)) {
-                int32_t ua[2];
-                if (copy_from_user(ua, (void *)regs->cx, sizeof(ua)))
-                    break;
-                if (SYS_RECVMSG == regs->bx)
-                    smith_trace_sysret_recvmsg((long)ua[0], (long)ua[1], ret);
-                else
-                    smith_trace_sysret_recvdat((long)ua[0], (long)ua[1], ret);
-            } else if (DNS_HOOK && SYS_RECVMMSG == regs->bx) {
-            } else if (BIND_HOOK && SYS_BIND == regs->bx) {
-            } else if (ACCEPT_HOOK && (SYS_ACCEPT == regs->bx ||
-                                       SYS_ACCEPT4 == regs->bx)) {
-            }
-            break;
-
-        case 371 /* __NR_ia32_recvfrom */:
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvdat(regs->bx, regs->cx, ret);
-            break;
-        case 372 /* __NR_ia32_recvmsg */:
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvmsg(regs->bx, regs->cx, ret);
-            break;
-    }
-}
-
-#elif defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
-
-/* only for ARM64 system */
-static void smith_trace_sysexit_arm32(struct pt_regs *regs, long id, long ret)
-{
-    switch (id) {
-
-        /*
-         * socket related
-         */
-#if 0   /* socketcall not implemented for ARM64 */
-        case 102: /* socketcall */
-            if (CONNECT_HOOK && SYS_CONNECT == regs->orig_x0) {
-                int32_t ua[2];
-                if (copy_from_user(ua, (void *)regs->regs[1], sizeof(ua)))
-                    break;
-                smith_trace_sysret_connect(ua[0], ua[1], ret);
-            } else if (DNS_HOOK && ret >= 20 && (SYS_RECV == regs->orig_x0 ||
-                                                 SYS_RECVFROM == regs->orig_x0 ||
-                                                 SYS_RECVMSG == regs->orig_x0)) {
-                int32_t ua[2];
-                if (copy_from_user(ua, (void *)regs->regs[1], sizeof(ua)))
-                    break;
-                if (SYS_RECVMSG == regs->orig_x0)
-                    smith_trace_sysret_recvmsg((long)ua[0], (long)ua[1], ret);
-                else
-                    smith_trace_sysret_recvdat((long)ua[0], (long)ua[1], ret);
-            } else if (DNS_HOOK && SYS_RECVMMSG == regs->orig_x0) {
-            } else if (BIND_HOOK && SYS_BIND == regs->orig_x0) {
-                int32_t sockfd;
-                if (copy_from_user(&sockfd, (void *)regs->regs[1], sizeof(sockfd)))
-                    break;
-                smith_trace_sysret_bind(sockfd, ret);
-            } else if (ACCEPT_HOOK && (SYS_ACCEPT == regs->orig_x0 ||
-                                       SYS_ACCEPT4 == regs->orig_x0)) {
-                smith_trace_sysret_accept(ret);
-            }
-            break;
-#endif
-
-        case 291: /* recv */
-        case 292: /* recvfrom */
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvdat(regs->orig_x0, regs->regs[1], ret);
-            break;
-        case 297: /* recvmsg */
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvmsg(regs->orig_x0, regs->regs[1], ret);
-            break;
-        case 365: /* recvmmsg */
-            break;
-    }
-}
-#endif
-
-TRACEPOINT_PROBE(smith_trace_sys_exit, struct pt_regs *regs, long ret)
-{
-    long id = syscall_get_nr(current, regs);
-
-    /* ignore all kernel threads */
-    if (current->flags & PF_KTHREAD)
-        return;
-
-#if BITS_PER_LONG == 32
-
-#if IS_ENABLED(CONFIG_X86)
-    /* 32bit OS - x86 / i386 */
-    smith_trace_sysexit_x86(regs, id, ret);
-    return;
-#endif
-
-#elif BITS_PER_LONG == 64
-
-#if IS_ENABLED(CONFIG_IA32_EMULATION)
-    /*
-     * Parameters passing for x86-32 syscall:
-     * 1) %eax for syscall_number
-     * 2) %ebx, %ecx, %edx, %esi, %edi, %ebp are used for passing 6 parameters
-     * 3) if there are more than 6 arguments (very unlikely), %ebx must contain
-     *    the user memory location where the list of arguments is stored
-     */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
-    /* in_ia32_syscall(): introduced after 4.7.0 */
-    if (unlikely(in_ia32_syscall())) {
-#else
-    if (unlikely(current_thread_info()->status & TS_COMPAT)) {
-#endif
-        smith_trace_sysexit_x86(regs, id, ret);
-        return;
-    }
-#endif
-
-#if defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
-    if (ESR_ELx_EC_SVC32 == ESR_ELx_EC(read_sysreg(esr_el1))) {
-        smith_trace_sysexit_arm32(regs, id, ret);
-        return;
-    }
-#endif
-
-    /* 64-bit native mode: HIDS doesn't support 32bit OS */
-    switch (id) {
-
-        /*
-         * socket related
-         */
-
-#ifdef       __NR_socketcall
-        case __NR_socketcall:
-            if (CONNECT_HOOK && SYS_CONNECT == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (DNS_HOOK && SYS_RECV == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (DNS_HOOK && SYS_RECVFROM == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (DNS_HOOK && SYS_RECVMSG == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (DNS_HOOK && SYS_RECVMMSG == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (BIND_HOOK && SYS_BIND == p_regs_get_arg1_of_syscall(regs)) {
-            } else if (ACCEPT_HOOK && (SYS_ACCEPT == p_regs_get_arg1_of_syscall(regs) ||
-                                       SYS_ACCEPT4 == p_regs_get_arg1_syscall(regs))) {
-            }
-            break;
-#endif
-
-#ifdef       __NR_recv
-        case __NR_recv:
-#endif
-        case __NR_recvfrom:
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvdat(p_regs_get_arg1_of_syscall(regs),
-                                           p_regs_get_arg2_syscall(regs), ret);
-            break;
-        case __NR_recvmsg:
-            if (DNS_HOOK && ret >= 20)
-                smith_trace_sysret_recvmsg(p_regs_get_arg1_of_syscall(regs),
-                                           p_regs_get_arg2_syscall(regs), ret);
-            break;
-
-        default:
-            break;
-    }
-#endif /* BITS_PER_LONG == 64 */
-}
-
-static struct smith_tracepoint {
-    const char *name;
-    void *handler;
-    void *data;
-    struct tracepoint *control;
-} g_smith_tracepoints[] = {
-    /*
-     * only hook sys_exit tracepoint, since sys_enter or sys_exit will
-     * affect all syscalls, and could lead performance drop of about 3
-     * - 5%, even with noop-processing in the hookpoint callback
-     */
-    {.name = "sys_exit", .handler = smith_trace_sys_exit}
-};
-#define NUM_TRACE_POINTS (sizeof(g_smith_tracepoints) / sizeof(struct smith_tracepoint))
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 15, 0)
-static void smith_query_tracepoints(struct tracepoint *tp, void *ignore)
-{
-    int i;
-    for (i = 0; i < NUM_TRACE_POINTS; i++) {
-        if (strcmp(g_smith_tracepoints[i].name, tp->name) == 0)
-            g_smith_tracepoints[i].control = tp;
-    }
-}
-static int smith_assert_tracepoints(void)
-{
-    int i;
-
-    for_each_kernel_tracepoint(smith_query_tracepoints, NULL);
-    for (i = 0; i < NUM_TRACE_POINTS; i++) {
-        if (!g_smith_tracepoints[i].control)
-            return -ENOENT;
-    }
-
-    return 0;
-}
-static int smith_register_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_register(tp->control, tp->handler, tp->data);
-}
-static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_unregister(tp->control, tp->handler, tp->data);
-}
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35)
-static int smith_assert_tracepoints(void)
-{
-    return 0;
-}
-static int smith_register_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_register(tp->name, tp->handler, tp->data);
-}
-static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_unregister(tp->name, tp->handler, tp->data);
-}
-#else
-static int smith_assert_tracepoints(void)
-{
-    return 0;
-}
-static int smith_register_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_register(tp->name, tp->handler);
-}
-static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
-{
-    return tracepoint_probe_unregister(tp->name, tp->handler);
-}
-#endif
-
-static int __init smith_sysret_init(void)
-{
-    int i, rc;
-
-    /* skip raw tracepoint registration */
-    if (!RAWTP_HOOK)
-        return 0;
-
-    /* check the tracepoints of our interest */
-    rc = smith_assert_tracepoints();
-    if (rc) {
-        printk(KERN_INFO "[ELKEID] failed to register tracepoints: %d\n", rc);
-        goto errorout;
-    }
-
-    /* check dns parameters */
-    smith_check_dns_params();
-
-    /* register callbacks for the tracepoints of our interest */
-    for (i = 0; i < NUM_TRACE_POINTS; i++) {
-        rc = smith_register_tracepoint(&g_smith_tracepoints[i]);
-        if (rc)
-            goto cleanup;
-    }
-
-errorout:
-    return rc;
-
-cleanup:
-    while (--i >= 0)
-        smith_unregister_tracepoint(&g_smith_tracepoints[i]);
-    return rc;
-}
-
-static void smith_sysret_fini(void)
-{
-    int i;
-
-    /* skip raw tracepoint unregistration */
-    if (!RAWTP_HOOK)
-        return;
-
-    /* register callbacks for the tracepoints of our interest */
-    for (i = NUM_TRACE_POINTS; i > 0; i--)
-        smith_unregister_tracepoint(&g_smith_tracepoints[i - 1]);
-}
-
-/*
- * netfilter nf_hooks for port-scan attack detection
- */
-#include <linux/skbuff.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
-
-static unsigned int smith_nf_psad_v4_handler(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
-                    void *priv,
-                    struct sk_buff *skb,
-                    const struct nf_hook_state *state
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
-                    const struct nf_hook_ops *ops,
-                    struct sk_buff *skb,
-                    const struct nf_hook_state *state
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
-                    const struct nf_hook_ops *ops,
-                    struct sk_buff *skb,
-                    const struct net_device *in,
-                    const struct net_device *out,
-                    int (*okfn)(struct sk_buff *)
-#else
-                    unsigned int hooknum,
-                    struct sk_buff *skb,
-                    const struct net_device *in,
-                    const struct net_device *out,
-                    int (*okfn)(struct sk_buff *)
-#endif
-    )
-{
-    const struct iphdr *iph = ip_hdr(skb);
-    const struct tcphdr *tcp;
-    u32 len;
-    int flags = TCP_FLAG_SYN;
-
-    if (iph->protocol != IPPROTO_TCP)
-        goto out;
-    len = ntohs(iph->tot_len);
-    if (len > skb->len || sizeof(*iph) + sizeof(*tcp) > skb->len)
-        goto out;
-    tcp = (struct tcphdr *)(iph + 1) /* tcp_hdr(skb) */;
-    if (!tcp->syn)
-        goto out;
-
-    flags |= (tcp->fin ? TCP_FLAG_FIN : 0) |
-             (tcp->rst ? TCP_FLAG_RST : 0) |
-             (tcp->urg ? TCP_FLAG_URG : 0) |
-             (tcp->ack ? TCP_FLAG_ACK : 0) |
-             (tcp->psh ? TCP_FLAG_PSH : 0);
-    psad4_print(iph->saddr, tcp->source, iph->daddr, tcp->dest, flags);
-
-out:
-    return NF_ACCEPT;
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-static unsigned int smith_nf_psad_v6_handler(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
-                    void *priv,
-                    struct sk_buff *skb,
-                    const struct nf_hook_state *state
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
-                    const struct nf_hook_ops *ops,
-                    struct sk_buff *skb,
-                    const struct nf_hook_state *state
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
-                    const struct nf_hook_ops *ops,
-                    struct sk_buff *skb,
-                    const struct net_device *in,
-                    const struct net_device *out,
-                    int (*okfn)(struct sk_buff *)
-#else
-                    unsigned int hooknum,
-                    struct sk_buff *skb,
-                    const struct net_device *in,
-                    const struct net_device *out,
-                    int (*okfn)(struct sk_buff *)
-#endif
-    )
-{
-    const struct ipv6hdr *iph = ipv6_hdr(skb);
-    const struct tcphdr *tcp;
-    u32 len;
-    int flags = TCP_FLAG_SYN;
-
-    if (iph->version != 6)
-        goto out;
-    if (iph->nexthdr != 6 /* NEXTHDR_TCP */)
-        goto out;
-    len = ntohs(iph->payload_len);
-    if (len + sizeof(*iph) > skb->len || sizeof(*iph) + sizeof(*tcp) > skb->len)
-        goto out;
-    tcp = (struct tcphdr *)(iph + 1) /* tcp_hdr(skb) */;
-    if (!tcp->syn)
-        goto out;
-
-    flags |= (tcp->fin ? TCP_FLAG_FIN : 0) |
-             (tcp->rst ? TCP_FLAG_RST : 0) |
-             (tcp->urg ? TCP_FLAG_URG : 0) |
-             (tcp->ack ? TCP_FLAG_ACK : 0) |
-             (tcp->psh ? TCP_FLAG_PSH : 0);
-    psad6_print(&iph->saddr, tcp->source, &iph->daddr, tcp->dest, flags);
-
-out:
-    return NF_ACCEPT;
-}
-#endif
-
-static struct nf_hook_ops g_smith_nf_psad[] = {
-        {
-                .hook =           smith_nf_psad_v4_handler,
-                .pf =             NFPROTO_IPV4,
-                .hooknum =        NF_INET_PRE_ROUTING,
-                .priority =       NF_IP_PRI_FIRST,
-        },
-#if IS_ENABLED(CONFIG_IPV6)
-        {
-                .hook =           smith_nf_psad_v6_handler,
-                .pf =             NFPROTO_IPV6,
-                .hooknum =        NF_INET_PRE_ROUTING,
-                .priority =       NF_IP_PRI_FIRST,
-        },
-#endif
-};
-
-static DEFINE_MUTEX(g_nf_psad_lock);
-static int g_nf_psad_switch = 0;
-static int g_nf_psad_status = 0;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
-
-static int smith_nf_psad_reg(struct net *net)
-{
-    return nf_register_net_hooks(net, g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
-}
-
-static void smith_nf_psad_unreg(struct net *net)
-{
-    nf_unregister_net_hooks(net, g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
-}
-
-#else
-
-static atomic_t g_nf_psad_regged = ATOMIC_INIT(0);
-
-static int smith_nf_psad_reg(struct net *net)
-{
-    int rc = 0;
-
-    /*
-     * only do register for the 1st time. We need control the callings of
-     * nf_register_hooks if we keep register_pernet_subsys for kernels < 4.3
-     */
-    if (1 == atomic_inc_return(&g_nf_psad_regged))
-        rc = nf_register_hooks(g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
-
-    return rc;
-}
-
-static void smith_nf_psad_unreg(struct net *net)
-{
-    /* do cleanup for the last instance of net namespace */
-    if (0 == atomic_dec_return(&g_nf_psad_regged))
-        nf_unregister_hooks(g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
-}
-
-#endif /* >= 4.3.0 */
-
-static struct pernet_operations smith_psad_net_ops = {
-    .init = smith_nf_psad_reg,
-    .exit = smith_nf_psad_unreg,
-};
-
-static void smith_switch_psad(void)
-{
-    mutex_lock(&g_nf_psad_lock);
-    if (g_nf_psad_switch != g_nf_psad_status) {
-        if (g_nf_psad_switch) {
-            if (!register_pernet_subsys(&smith_psad_net_ops))
-                g_nf_psad_status = 1;
-            else
-                g_nf_psad_switch = 0;
-        } else {
-            unregister_pernet_subsys(&smith_psad_net_ops);
-            g_nf_psad_status = 0;
-        }
-        printk("psad_switch: %d psad_status: %d\n", g_nf_psad_switch, g_nf_psad_status);
-    }
-    mutex_unlock(&g_nf_psad_lock);
-}
-
-#if defined(module_param_cb)
-static int smith_set_nf_psad_switch(const char *val, const struct kernel_param *kp)
-{
-    int rc = param_set_bool(val, kp);
-    if (!rc)
-        smith_switch_psad();
-    return rc;
-}
-const struct kernel_param_ops smith_nf_psad_ops = {
-    .set = smith_set_nf_psad_switch,
-    .get = param_get_bool,
-};
-module_param_cb(psad_switch, &smith_nf_psad_ops, &g_nf_psad_switch, S_IRUGO|S_IWUSR);
-#elif defined(module_param_call)
-static int smith_set_nf_psad_switch(const char *val, struct kernel_param *kp)
-{
-    int rc = param_set_bool(val, kp);
-    if (!rc)
-        smith_switch_psad();
-    return rc;
-}
-module_param_call(psad_switch, smith_set_nf_psad_switch, param_get_bool, &g_nf_psad_switch, S_IRUGO|S_IWUSR);
-#else
-# warning "moudle_param_cb or module_param_call are not supported by target kernel"
-#endif
-MODULE_PARM_DESC(psad_switch, "Set to 1 to enable detection of port-scanning, 0 otherwise");
 
 static int mprotect_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
@@ -2984,19 +2295,26 @@ static int mprotect_pre_handler(struct kprobe *p, struct pt_regs *regs)
     char *file_buf = NULL;
     char *vm_file_path = "-1";
     char *vm_file_buff = NULL;
-    char *exe_path = "-1";
-    char *abs_buf = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
     char *pid_tree = NULL;
 
     struct vm_area_struct *vma;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
 
     //only get PROT_EXEC mprotect info
     //The memory can be used to store instructions which can then be executed. On most architectures,
     //this flag implies that the memory can be read (as if PROT_READ had been specified).
     prot = (unsigned long)p_regs_get_arg2(regs);
     if (prot & PROT_EXEC) {
-        abs_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-        exe_path = smith_get_exe_file(abs_buf, PATH_MAX);
 
         vma = (struct vm_area_struct *)p_regs_get_arg1(regs);
         if (IS_ERR_OR_NULL(vma)) {
@@ -3025,22 +2343,20 @@ static int mprotect_pre_handler(struct kprobe *p, struct pt_regs *regs)
             }
             rcu_read_unlock();
 
-            pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
+            smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
             mprotect_print(exe_path, prot, file_path, target_pid, vm_file_path, pid_tree);
         }
-
-        if (pid_tree)
-            smith_kfree(pid_tree);
 
         if (file_buf)
             smith_kfree(file_buf);
 
-        if (abs_buf)
-            smith_kfree(abs_buf);
-
         if (vm_file_buff)
             smith_kfree(vm_file_buff);
     }
+
+out:
+    if (tid)
+        smith_put_tid(tid);
     return 0;
 }
 
@@ -3049,7 +2365,7 @@ static int call_usermodehelper_exec_pre_handler(struct kprobe *p, struct pt_regs
     int wait = 0, argv_res_len = 0, argv_len = 0;
     int offset = 0, free_argv = 0, i;
     void *si_tmp;
-    const char *path;
+    char *path;
     char **argv;
     char *argv_res = NULL;
     struct subprocess_info *si;
@@ -3061,7 +2377,7 @@ static int call_usermodehelper_exec_pre_handler(struct kprobe *p, struct pt_regs
     si = (struct subprocess_info *)si_tmp;
     wait = (int)p_regs_get_arg2(regs);
 
-    path = si->path;
+    path = (char *)si->path;
     argv = si->argv;
 
     if (IS_ERR_OR_NULL(path))
@@ -3108,29 +2424,34 @@ static int call_usermodehelper_exec_pre_handler(struct kprobe *p, struct pt_regs
 
 static void rename_and_link_handler(int type, char * oldori, char * newori, char * s_id)
 {
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     char *exe_path = DEFAULT_RET_STR;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out_free;
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
-    if (type)
+    if (type) {
         rename_print(exe_path, oldori, newori, s_id);
-    else
+        file_creation_print(exe_path, newori);
+    } else {
         link_print(exe_path, oldori, newori, s_id);
+    }
 
-out_free:
-    if (buffer)
-        smith_kfree(buffer);
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
 
 static int rename_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
     char *old_path_str = DEFAULT_RET_STR;
     char *new_path_str = DEFAULT_RET_STR;
-    char *s_id = DEFAULT_RET_STR;
+    char *s_id = NULL;
 
     char *old_buf = NULL;
     char *new_buf = NULL;
@@ -3151,7 +2472,7 @@ static int rename_pre_handler(struct kprobe *p, struct pt_regs *regs)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         old_path_str = dentry_path_raw(old_dentry, old_buf, PATH_MAX);
 #else
-        old_path_str = smith_dentry_path(old_dentry, old_buf, PATH_MAX);
+        old_path_str = __dentry_path(old_dentry, old_buf, PATH_MAX);
 #endif
     }
 
@@ -3159,7 +2480,7 @@ static int rename_pre_handler(struct kprobe *p, struct pt_regs *regs)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         new_path_str = dentry_path_raw(new_dentry, new_buf, PATH_MAX);
 #else
-        new_path_str = smith_dentry_path(new_dentry, new_buf, PATH_MAX);
+        new_path_str = __dentry_path(new_dentry, new_buf, PATH_MAX);
 #endif
     }
 
@@ -3187,7 +2508,7 @@ static int link_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
     char *old_path_str = DEFAULT_RET_STR;
     char *new_path_str = DEFAULT_RET_STR;
-    char *s_id = DEFAULT_RET_STR;
+    char *s_id = NULL;
 
     char *old_buf = NULL;
     char *new_buf = NULL;
@@ -3208,7 +2529,7 @@ static int link_pre_handler(struct kprobe *p, struct pt_regs *regs)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         old_path_str = dentry_path_raw(old_dentry, old_buf, PATH_MAX);
 #else
-        old_path_str = smith_dentry_path(old_dentry, old_buf, PATH_MAX);
+        old_path_str = __dentry_path(old_dentry, old_buf, PATH_MAX);
 #endif
     }
 
@@ -3216,7 +2537,7 @@ static int link_pre_handler(struct kprobe *p, struct pt_regs *regs)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         new_path_str = dentry_path_raw(new_dentry, new_buf, PATH_MAX);
 #else
-        new_path_str = smith_dentry_path(new_dentry, new_buf, PATH_MAX);
+        new_path_str = __dentry_path(new_dentry, new_buf, PATH_MAX);
 #endif
     }
 
@@ -3226,7 +2547,7 @@ static int link_pre_handler(struct kprobe *p, struct pt_regs *regs)
     if (IS_ERR(new_path_str))
         new_path_str = DEFAULT_RET_STR;
 
-    if(!IS_ERR_OR_NULL(old_dentry->d_sb))
+    if (!IS_ERR_OR_NULL(old_dentry->d_sb))
         s_id = old_dentry->d_sb->s_id;
 
     rename_and_link_handler(0, old_path_str, new_path_str, s_id);
@@ -3240,134 +2561,49 @@ static int link_pre_handler(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
-static int setsid_pre_handler(struct kprobe *p, struct pt_regs *regs)
+static void smith_trace_sysret_memfd_create(char __user *name, long flags, long ret)
 {
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out;
-
-    setsid_print(exe_path);
-
-out:
-    if (buffer)
-        smith_kfree(buffer);
-
-    return 0;
-}
-
-static int prctl_pre_handler(struct kprobe *p, struct pt_regs *regs)
-{
-    char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
-    int newname_len = 0;
-    char __user *newname_ori;
-    char *newname = NULL;
-
-
-    //only get PS_SET_NAME data
-    //PR_SET_NAME (since Linux 2.6.9)
-    //Set the name of the calling thread, using the value in the lo‐
-    //cation pointed to by (char *) arg2.  The name can be up to 16
-    //bytes long, including the terminating null byte.  (If the
-    //length of the string, including the terminating null byte, ex‐
-    //ceeds 16 bytes, the string is silently truncated.)
-    if (PR_SET_NAME != (int)p_get_arg1_syscall(regs))
-        return 0;
-
-    newname_ori = (void *)p_get_arg2_syscall(regs);
-    if (IS_ERR_OR_NULL(newname_ori))
-        return 0;
-
-    newname_len = smith_strnlen_user((char __user *)newname_ori, PATH_MAX);
-    if (newname_len <= 0 || newname_len > PATH_MAX)
-        return 0;
-
-    newname = smith_kmalloc(newname_len + 1, GFP_ATOMIC);
-    if(!newname)
-        return 0;
-
-    if(smith_copy_from_user(newname, (char __user *)newname_ori, newname_len)) {
-        smith_kfree(newname);
-        return 0;
-    }
-    newname[newname_len] = '\0';
-
-    if (strcmp(newname, current->comm) == 0) {
-        smith_kfree(newname);
-        return 0;
-    }
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-    if (execve_exe_check(exe_path, strlen(exe_path)))
-        goto out;
-
-    prctl_print(exe_path, PR_SET_NAME, newname);
-
-out:
-    if (buffer)
-        smith_kfree(buffer);
-
-    smith_kfree(newname);
-
-    return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-static int memfd_create_kprobe_pre_handler(struct kprobe *p, struct pt_regs *regs)
-{
-    int len;
-    unsigned long flags;
-
+    struct smith_tid *tid = NULL;
     char *fdname = NULL;
-    char __user *fdname_ori;
-    char *exe_path = DEFAULT_RET_STR;
-    char *exe_buffer = NULL;
+    int len;
 
-    exe_buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(exe_buffer, PATH_MAX);
-
-    fdname_ori = (void *)p_get_arg1_syscall(regs);
-    if (IS_ERR_OR_NULL(fdname_ori))
+    if (IS_ERR_OR_NULL(name))
         goto out;
-
-    len = smith_strnlen_user((char __user *)fdname_ori, PATH_MAX);
+    len = smith_strnlen_user((char __user *)name, PATH_MAX);
     if (len <= 0 || len > PATH_MAX)
         goto out;
 
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
     fdname = smith_kmalloc(len + 1, GFP_ATOMIC);
-    if(!fdname)
+    if (!fdname)
         goto out;
-
-    if(smith_copy_from_user(fdname, (char __user *)fdname_ori, len))
+    if(smith_copy_from_user(fdname, name, len))
         goto out;
-
     fdname[len] = '\0';
 
-    flags = (unsigned long)p_get_arg2_syscall(regs);
     memfd_create_print(exe_path, fdname, flags);
 
 out:
-    if (exe_buffer)
-        smith_kfree(exe_buffer);
-
+    if (tid)
+        smith_put_tid(tid);
     if (fdname)
         smith_kfree(fdname);
-
-    return 0;
 }
-#endif
 
 static int open_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
     int filename_len = 0;
 
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     char *filename = NULL;
     char __user *filename_ori;
 
@@ -3382,29 +2618,31 @@ static int open_pre_handler(struct kprobe *p, struct pt_regs *regs)
     filename = smith_kmalloc(filename_len + 1, GFP_ATOMIC);
     if(!filename)
         return 0;
-
     if(smith_copy_from_user(filename, (char __user *)filename_ori, filename_len))
         goto out;
-
     filename[filename_len] = '\0';
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
     open_print(exe_path, filename, (int)p_get_arg2_syscall(regs),
                (umode_t)p_get_arg3_syscall(regs));
 
 out:
-    if (buffer)
-        smith_kfree(buffer);
-
+    if (tid)
+        smith_put_tid(tid);
     smith_kfree(filename);
 
     return 0;
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0)
-static struct inode *file_inode(struct file * f)
+static __inline struct inode *file_inode(struct file * f)
 {
     return f->f_path.dentry->d_inode;
 }
@@ -3415,9 +2653,9 @@ static int write_pre_handler(struct kprobe *p, struct pt_regs *regs)
     struct file *file;
     const char __user *buf;
     char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
     char *kbuf = NULL;
     char *pname_buf = NULL;
-    char *buffer = NULL;
     char *file_path = DEFAULT_RET_STR;
     size_t len;
 
@@ -3435,63 +2673,202 @@ static int write_pre_handler(struct kprobe *p, struct pt_regs *regs)
     if(smith_copy_from_user(kbuf, buf, len))
         goto out;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
     pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
     file_path = smith_d_path(&(file)->f_path, pname_buf, PATH_MAX);
 
-    write_print(exe_path, file_path, kbuf);
+    write_print(exe_path, file_path, kbuf, len);
 
 out:
-    if (buffer)
-        smith_kfree(buffer);
     if (pname_buf)
         smith_kfree(pname_buf);
     if (kbuf)
         smith_kfree(kbuf);
+    if (tid)
+        smith_put_tid(tid);
 
     return 0;
 }
 
 static int openat_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-    int filename_len = 0;
-
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     char *filename = NULL;
     char __user *filename_ori;
+    int filename_len = 0;
 
     filename_ori = (void *)p_get_arg2_syscall(regs);
     if (IS_ERR_OR_NULL(filename_ori))
         return 0;
 
-    filename_len = smith_strnlen_user((char __user *)filename_ori, PATH_MAX);
+    filename_len = smith_strnlen_user(filename_ori, PATH_MAX);
     if (filename_len <= 0 || filename_len > PATH_MAX)
         return 0;
 
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
     filename = smith_kmalloc(filename_len + 1, GFP_ATOMIC);
-    if(!filename)
-        return 0;
+    if (!filename)
+        goto out;
 
-    if(smith_copy_from_user(filename, (char __user *)filename_ori, filename_len))
-    goto out;
-
+    if (smith_copy_from_user(filename, filename_ori, filename_len))
+        goto out;
     filename[filename_len] = '\0';
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
 
     open_print(exe_path, filename, (int)p_get_arg3_syscall(regs),
                (umode_t)p_get_arg4_syscall(regs));
 
-    out:
-    if (buffer)
-        smith_kfree(buffer);
-
+out:
+    if (tid)
+        smith_put_tid(tid);
     smith_kfree(filename);
 
+    return 0;
+}
+
+static void smith_trace_sysret_chmod_comm(char *file_path, mode_t mode, int ret)
+{
+    struct smith_tid *tid = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
+    char *id;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    /* query s_id of pwd's filesystem super_block */
+    if (current->fs && current->fs->pwd.dentry &&
+        current->fs->pwd.dentry->d_sb)
+        id = current->fs->pwd.dentry->d_sb->s_id;
+    else
+        id = NULL;
+
+    chmod_print(exe_path, pid_tree, file_path, id, mode, ret);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
+}
+
+#if defined(__NR_chmod) || IS_ENABLED(CONFIG_IA32_EMULATION) || (defined(CONFIG_ARM64) && defined(CONFIG_COMPAT))
+static void smith_trace_sysret_chmod(char __user *fn, mode_t mode, int ret)
+{
+    char *buffer = NULL;
+    char *file_path;
+    int s;
+
+    if (!(mode & (S_IXUSR | S_ISUID)))
+        return;
+
+    s = smith_strnlen_user(fn, PATH_MAX);
+    if (s <= 0 || s > PATH_MAX)
+        return;
+
+    buffer = smith_kzalloc(PATH_MAX + s + 2, GFP_ATOMIC);
+    if (buffer) {
+        file_path = smith_get_pwd_path(buffer, PATH_MAX);
+        if (file_path >= buffer && file_path < buffer + PATH_MAX) {
+            int l = strlen(file_path);
+            file_path[l++] = '/';
+            l = smith_copy_from_user(&file_path[l], fn, s);
+        }
+    } else {
+        file_path = NULL;
+    }
+
+    smith_trace_sysret_chmod_comm(file_path, mode, ret);
+
+    if (buffer)
+        smith_kfree(buffer);
+}
+#endif
+
+static void smith_trace_sysret_fchmod(int fd, mode_t mode, int ret)
+{
+    char *buffer = NULL;
+    char *file_path;
+
+    if (!(mode & (S_IXUSR | S_ISUID)))
+        return;
+
+    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    if (buffer) {
+        file_path = smith_get_file_path(fd, buffer, PATH_MAX);
+    } else {
+        file_path = NULL;
+    }
+    smith_trace_sysret_chmod_comm(file_path, mode, ret);
+
+    if (buffer)
+        smith_kfree(buffer);
+}
+
+static void smith_trace_sysret_fchmodat(int dfd, char __user *fn, mode_t mode, int ret)
+{
+    char *buffer = NULL;
+    char *file_path;
+    int s;
+
+    if (!(mode & (S_IXUSR | S_ISUID)))
+        return;
+
+    s = smith_strnlen_user(fn, PATH_MAX);
+    if (s <= 0 || s > PATH_MAX)
+        return;
+
+    buffer = smith_kzalloc(PATH_MAX + s + 2, GFP_ATOMIC);
+    if (buffer) {
+        if (AT_FDCWD == dfd)
+            file_path = smith_get_pwd_path(buffer, PATH_MAX);
+        else
+            file_path = smith_get_file_path(dfd, buffer, PATH_MAX);
+        if (file_path >= buffer && file_path < buffer + PATH_MAX) {
+            int l = strlen(file_path);
+            file_path[l++] = '/';
+            l = smith_copy_from_user(&file_path[l], fn, s);
+        }
+    } else {
+        file_path = NULL;
+    }
+
+    smith_trace_sysret_chmod_comm(file_path, mode, ret);
+
+    if (buffer)
+        smith_kfree(buffer);
+}
+
+/*
+ * data contains the mount options specified by user. It
+ * could containbinary chars or utf8/unicode, depending
+ * on filesystem. The buffer is fixed as 1 page long.
+ */
+static int mount_check_options(char *data)
+{
+    int i;
+    for (i = PAGE_SIZE - 1; i > 0; i--) {
+        if (data[i] == 0)
+            return 1;
+    }
     return 0;
 }
 
@@ -3501,137 +2878,183 @@ static int mount_pre_handler(struct kprobe *p, struct pt_regs *regs)
 
     char *pid_tree = NULL;
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
 
     char *pname_buf = NULL;
     char *file_path = DEFAULT_RET_STR;
 
-    const char *fstype = NULL;
-    const char *dev_name = NULL;
+    char *data;
+    char *fstype = NULL;
+    char *dev_name = NULL;
 
+    struct super_block *sb;
     struct path *path = NULL;
 
-    dev_name = (const char *)p_regs_get_arg1(regs);
+    dev_name = (char *)p_regs_get_arg1(regs);
     path = (struct path *)p_regs_get_arg2(regs);
-    fstype = (const char *)p_regs_get_arg3(regs);
+    fstype = (char *)p_regs_get_arg3(regs);
     flags = (unsigned long)p_regs_get_arg4(regs);
 
     if (IS_ERR_OR_NULL(path) || !dev_name || !*dev_name)
         return 0;
 
-    pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
+    if (IS_ERR_OR_NULL(path->dentry) || IS_ERR_OR_NULL(path->dentry->d_sb))
+        sb = NULL;
+    else
+        sb = path->dentry->d_sb;
 
     pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
     file_path = smith_d_path(path, pname_buf, PATH_MAX);
+    data = (char *)p_regs_get_arg5(regs);
+    if (!data || !mount_check_options(data))
+        data = DEFAULT_RET_STR;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
-    if (!execve_exe_check(exe_path, strlen(exe_path)))
-        mount_print(exe_path, pid_tree, dev_name, file_path, fstype, flags);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
 
-    if (buffer)
-        smith_kfree(buffer);
+    smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
+    mount_print(exe_path, pid_tree, dev_name, file_path, sb ? sb->s_id : NULL, fstype, flags, data);
 
+out:
+    if (tid)
+        smith_put_tid(tid);
     if (pname_buf)
         smith_kfree(pname_buf);
-
-    if (pid_tree)
-        smith_kfree(pid_tree);
 
     return 0;
 }
 
-static int nanosleep_pre_handler(struct kprobe *p, struct pt_regs *regs)
+static void smith_trace_sysret_nanosleep(long tsu)
 {
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
     struct __kernel_timespec *ts;
     struct timespec64 tu = {0, 0};
 #else
     struct timespec tu = {0, 0};
 #endif
-    void *tmp;
-
-    tmp = (void *)p_get_arg1_syscall(regs);
-    if (IS_ERR_OR_NULL(tmp))
-        return 0;
+    if (IS_ERR_OR_NULL((void *)tsu))
+        return;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 18, 0)
-    ts = (struct __kernel_timespec __user *)tmp;
+    ts = (struct __kernel_timespec __user *)tsu;
     if (get_timespec64(&tu, ts))
-        return 0;
+        return;
 
     if (!timespec64_valid(&tu))
-        return 0;
+        return;
 #else
-    if (smith_copy_from_user(&tu, (void __user *)tmp, sizeof(tu)))
-        return 0;
+    if (smith_copy_from_user(&tu, (void __user *)tsu, sizeof(tu)))
+        return;
     if (!timespec_valid(&tu))
-        return 0;
+        return;
 #endif
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
     /* Year-2038 issue: signed-32bit will overflow */
     nanosleep_print(exe_path, (long long)tu.tv_sec, tu.tv_nsec);
 
-    if (buffer)
-        smith_kfree(buffer);
-
-    return 0;
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
 
-static void kill_and_tkill_handler(int type, pid_t pid, int sig)
+static void smith_trace_sysret_kill(int pid, int sig, int ret)
 {
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
-    if (type)
-        kill_print(exe_path, pid, sig);
-    else
-        tkill_print(exe_path, pid, sig);
+    kill_print(exe_path, pid, sig, ret);
 
-    if (buffer)
-        smith_kfree(buffer);
-    return;
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
 
-static int kill_pre_handler(struct kprobe *p, struct pt_regs *regs)
+static void smith_trace_sysret_tkill(int pid, int sig, int ret)
 {
-    pid_t pid = (pid_t)p_get_arg1_syscall(regs);
-    int sig = (int)p_get_arg2_syscall(regs);
-    kill_and_tkill_handler(0, pid, sig);
-    return 0;
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
+    tkill_print(exe_path, pid, sig, ret);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
 
-static int tkill_pre_handler(struct kprobe *p, struct pt_regs *regs)
+static void smith_trace_sysret_tgkill(int tgid, int pid, int sig, int ret)
 {
-    pid_t pid = (pid_t)p_get_arg1_syscall(regs);
-    int sig = (int)p_get_arg2_syscall(regs);
-    kill_and_tkill_handler(1, pid, sig);
-    return 0;
+    char *exe_path = DEFAULT_RET_STR;
+    struct smith_tid *tid = NULL;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
+    tgkill_print(exe_path, tgid, pid, sig, ret);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
+
 
 static void delete_file_handler(int type, char *path)
 {
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     char *exe_path = DEFAULT_RET_STR;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
     if (type)
         security_path_rmdir_print(exe_path, path);
     else
         security_path_unlink_print(exe_path, path);
 
-    if (buffer)
-        smith_kfree(buffer);
+out:
+    if (tid)
+        smith_put_tid(tid);
 }
 
 static int security_path_rmdir_pre_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -3659,7 +3082,7 @@ static int security_path_rmdir_pre_handler(struct kretprobe_instance *ri, struct
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         pathstr = dentry_path_raw(de, pname_buf, PATH_MAX);
 #else
-        pathstr = smith_dentry_path(de, pname_buf, PATH_MAX);
+        pathstr = __dentry_path(de, pname_buf, PATH_MAX);
 #endif
 
         if (IS_ERR(pathstr))
@@ -3679,11 +3102,6 @@ static int rm_handler(struct kretprobe_instance *ri, struct pt_regs *regs)
     int uid = 0;
     uid = __get_current_uid();
     if (FAKE_RM && uid != 0) {
-        /*
-         * security_path_rmdir and security_path_unlink are called before
-         * the actual rmdir or unlink. Any return code other than 0 will
-         * skip (prevent) the actual rmdir or unlink in file system.
-         */
         smith_regs_set_return_value(regs, 1);
     }
     return 0;
@@ -3714,7 +3132,7 @@ static int security_path_unlink_pre_handler(struct kretprobe_instance *ri, struc
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 38)
         pathstr = dentry_path_raw(de, pname_buf, PATH_MAX);
 #else
-        pathstr = smith_dentry_path(de, pname_buf, PATH_MAX);
+        pathstr = __dentry_path(de, pname_buf, PATH_MAX);
 #endif
         if (IS_ERR(pathstr))
             pathstr = DEFAULT_RET_STR;
@@ -3730,19 +3148,25 @@ static int security_path_unlink_pre_handler(struct kretprobe_instance *ri, struc
 
 static void exit_handler(int type)
 {
+    struct smith_tid *tid = NULL;
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
 
     if (type)
         exit_print(exe_path);
     else
         exit_group_print(exe_path);
 
-    if (buffer)
-        smith_kfree(buffer);
+out:
+    if (tid)
+        smith_put_tid(tid);
     return;
 }
 
@@ -3758,48 +3182,354 @@ static int exit_group_pre_handler(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
-static int do_init_module_pre_handler(struct kprobe *p, struct pt_regs *regs)
+#include <linux/elf.h>
+
+struct load_info {
+    void * __user mod; /* user ptr of module data */
+    unsigned long len; /* file size */
+    Elf_Ehdr *hdr;  /* elf header */
+    Elf_Shdr *sechdrs; /* section headers */
+    char *secstrings; /* section names */
+    char *modinfo; /* modinfo section */
+    char *modname; /* module name */
+    struct module *module; /* this module seciton */
+};
+
+static int smith_validate_section_offset(struct load_info *info, Elf_Shdr *shdr)
 {
+    unsigned long secend;
+
+    /* Check for both overflow and offset/size being too large */
+    secend = shdr->sh_offset + shdr->sh_size;
+    if (secend < shdr->sh_offset || secend > info->len)
+        return -ENOEXEC;
+    return 0;
+}
+
+/*
+ * Sanity checks against invalid binaries, wrong arch, weird elf version.
+ *
+ * Also do basic validity checks against section offsets and sizes, the
+ * section name string table, and the indices used for it (sh_name).
+ */
+static int smith_check_elf_header(struct load_info *info)
+{
+    if (info->len < sizeof(*(info->hdr))) {
+        pr_err("Invalid ELF header len %lu\n", info->len);
+        goto no_exec;
+    }
+
+    if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) != 0) {
+        pr_err("Invalid ELF header magic: != %s\n", ELFMAG);
+        goto no_exec;
+    }
+    if (info->hdr->e_type != ET_REL) {
+        pr_err("Invalid ELF header type: %u != %u\n",
+                info->hdr->e_type, ET_REL);
+        goto no_exec;
+    }
+    if (!elf_check_arch(info->hdr)) {
+        pr_err("Invalid architecture in ELF header: %u\n",
+                info->hdr->e_machine);
+        goto no_exec;
+    }
+    if (info->hdr->e_shentsize != sizeof(Elf_Shdr)) {
+        pr_err("Invalid ELF section header size\n");
+        goto no_exec;
+    }
+
+    /*
+     * e_shnum is 16 bits, and sizeof(Elf_Shdr) is
+     * known and small. So e_shnum * sizeof(Elf_Shdr)
+     * will not overflow unsigned long on any platform.
+     */
+    if (info->hdr->e_shoff >= info->len
+        || (info->hdr->e_shnum * sizeof(Elf_Shdr) >
+        info->len - info->hdr->e_shoff)) {
+        pr_err("Invalid ELF section header overflow\n");
+        goto no_exec;
+    }
+
+    /*
+     * Verify if the section name table index is valid.
+     */
+    if (info->hdr->e_shstrndx == SHN_UNDEF
+        || info->hdr->e_shstrndx >= info->hdr->e_shnum) {
+        pr_err("Invalid ELF section name index: %d || e_shstrndx (%d) >= e_shnum (%d)\n",
+                info->hdr->e_shstrndx, info->hdr->e_shstrndx,
+                info->hdr->e_shnum);
+        goto no_exec;
+    }
+    return 0;
+
+no_exec:
+    return -ENOEXEC;
+}
+
+/* ignore compiler buzzing of unknown fallthrough */
+#ifndef fallthrough /* fallthrough attribute supported from gcc 7 */
+/* __has_attribute supported on gcc >= 5, clang >= 2.9 and icc >= 17 */
+# if defined __has_attribute
+#  if __has_attribute(__fallthrough__)
+#   define fallthrough  __attribute__((__fallthrough__))
+#  endif
+# endif
+# ifndef fallthrough
+#  define fallthrough  do {} while (0)  /* fallthrough */
+# endif
+#endif
+
+static int smith_check_elf_sections(struct load_info *info)
+{
+    Elf_Shdr *shdr, *strhdr;
+    int i, err;
+
+    strhdr = &info->sechdrs[info->hdr->e_shstrndx];
+
+	/*
+	 * The code assumes that section 0 has a length of zero and
+	 * an addr of zero, so check for it.
+	 */
+    if (info->sechdrs[0].sh_type != SHT_NULL
+        || info->sechdrs[0].sh_size != 0
+        || info->sechdrs[0].sh_addr != 0) {
+        pr_err("ELF Spec violation: section 0 type(%d)!=SH_NULL or non-zero len or addr\n",
+                info->sechdrs[0].sh_type);
+        goto no_exec;
+    }
+
+    for (i = 1; i < info->hdr->e_shnum; i++) {
+        shdr = &info->sechdrs[i];
+        switch (shdr->sh_type) {
+        case SHT_NULL:
+        case SHT_NOBITS:
+            continue;
+        case SHT_SYMTAB:
+            if (shdr->sh_link == SHN_UNDEF
+                || shdr->sh_link >= info->hdr->e_shnum) {
+                pr_err("Invalid ELF sh_link!=SHN_UNDEF(%d) or (sh_link(%d) >= hdr->e_shnum(%d)\n",
+                    shdr->sh_link, shdr->sh_link, info->hdr->e_shnum);
+                goto no_exec;
+            }
+            fallthrough;
+        default:
+            err = smith_validate_section_offset(info, shdr);
+            if (err < 0) {
+                pr_err("Invalid ELF section in module (section %u type %u)\n",
+                    i, shdr->sh_type);
+                return err;
+            }
+
+            if (shdr->sh_flags & SHF_ALLOC) {
+                if (shdr->sh_name >= strhdr->sh_size) {
+                    pr_err("Invalid ELF section name in module (section %u type %u)\n",
+                        i, shdr->sh_type);
+                    return -ENOEXEC;
+                }
+            }
+            break;
+        }
+    }
+
+    return 0;
+
+no_exec:
+    return -ENOEXEC;
+}
+
+/* Find a module section: 0 means not found. */
+static Elf_Shdr *smith_locate_section(const struct load_info *info, const char *name)
+{
+    unsigned int i;
+
+    for (i = 1; i < info->hdr->e_shnum; i++) {
+        Elf_Shdr *shdr = &info->sechdrs[i];
+        /* Alloc bit cleared means "ignore it." */
+        if ((shdr->sh_flags & SHF_ALLOC)
+            && strcmp(info->secstrings + shdr->sh_name, name) == 0)
+            return shdr;
+    }
+    return 0;
+}
+
+static void *smith_load_section(struct load_info *info, Elf_Shdr *shdr)
+{
+    char *dat = NULL;
+
+    if (!shdr->sh_size)
+        return NULL;
+    if (smith_validate_section_offset(info, shdr) < 0) {
+        pr_err("Invalid ELF section hdr(type %u)\n", shdr->sh_type);
+        return NULL;
+    }
+
+    dat = smith_kmalloc(shdr->sh_size, GFP_ATOMIC);
+    if (!dat)
+        return NULL;
+    if (smith_copy_from_user(dat, info->mod + shdr->sh_offset, shdr->sh_size))
+        goto out;
+    dat[shdr->sh_size - 1] = 0;
+    return dat;
+
+out:
+    smith_kfree(dat);
+    return NULL;
+}
+
+static int smith_process_module_load(struct load_info *info)
+{
+    Elf_Shdr *shdr;
+    int i;
+
+    /* validate elf header */
+    if (info->len <= sizeof(*info->hdr))
+        return -EINVAL;
+    if (smith_copy_from_user(info->hdr, info->mod, sizeof(*info->hdr)))
+        return -EACCES;
+    if (smith_check_elf_header(info))
+        return -EINVAL;
+
+    /* allocate memory for elf sections */
+    info->sechdrs = smith_kmalloc(info->hdr->e_shnum * sizeof(Elf_Shdr), GFP_ATOMIC);
+    if (!info->sechdrs)
+        return -ENOMEM;
+    if (smith_copy_from_user(info->sechdrs, info->mod + info->hdr->e_shoff,
+                            info->hdr->e_shnum * sizeof(Elf_Shdr)))
+        return -EACCES;
+
+    /* load string section */
+    info->secstrings = smith_load_section(info, &info->sechdrs[info->hdr->e_shstrndx]);
+    if (!info->secstrings)
+        return -ENOMEM;
+
+    /* check elf sections */
+    if (smith_check_elf_sections(info))
+        return -EINVAL;
+
+    /* load .modinfo section */
+    shdr = smith_locate_section(info, ".modinfo");
+    if (shdr) {
+        info->modinfo = smith_load_section(info, shdr);
+        if (info->modinfo) {
+            info->modname = smith_strstr(info->modinfo, shdr->sh_size,
+                                        "name=");
+            if (info->modname) {
+                info->modname += 5;
+                goto out;
+            }
+
+            /* use whole modinfo as module name/id */
+            for (i = 0; i < shdr->sh_size - 1; i++) {
+                if (0 == *((char *)info->modinfo + i))
+                    *((char *)info->modinfo + i) = 0x20;
+            }
+            info->modname = info->modinfo;
+        }
+    }
+
+    /* give a try of this_module section */
+    shdr = smith_locate_section(info, ".gnu.linkonce.this_module");
+    if (shdr) {
+        info->module = smith_load_section(info, shdr);
+        if (info->module)
+            info->modname = info->module->name;
+    }
+    if (!info->modname)
+        return -ENOMEM;
+
+out:
+    return 0;
+}
+
+static void smith_trace_sysret_init_module(void __user *mod, int len, int ret)
+{
+    Elf_Ehdr hdr;
+    struct load_info info = {.mod = mod, .hdr = &hdr, .len = len,};
+
+    struct smith_tid *tid = NULL;
     char *pid_tree = NULL;
-    char *buffer = NULL;
     char *exe_path = DEFAULT_RET_STR;
     char *pname_buf = NULL;
     char *pname = NULL;
-    void *tmp_mod;
-    struct module *mod;
 
-    tmp_mod = (void *) p_regs_get_arg1(regs);
-    if (IS_ERR_OR_NULL(tmp_mod))
-        return 0;
-
-    mod = (struct module *)tmp_mod;
-
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
 
     pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
     pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
 
-    pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
-    do_init_module_print(exe_path, mod->name, pid_tree, pname);
+    smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
 
-    if (buffer)
-        smith_kfree(buffer);
+    /* process module data */
+    if (smith_process_module_load(&info))
+        goto out;
 
-    if (pid_tree)
-        smith_kfree(pid_tree);
+    do_init_module_print(exe_path, info.modname, pid_tree, pname);
 
-    if (pname_buf)
-        smith_kfree(pname_buf);
+out:
+    if (tid)
+        smith_put_tid(tid);
+    smith_kfree(pname_buf);
+    smith_kfree(info.module);
+    smith_kfree(info.modinfo);
+    smith_kfree(info.secstrings);
+    smith_kfree(info.sechdrs);
+    return;
+}
 
-    return 0;
+static void smith_trace_sysret_finit_module(int fd, int ret)
+{
+    struct smith_tid *tid = NULL;
+    char *pid_tree = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    char *pname_buf = NULL;
+    char *pname = NULL;
+    char *buffer = NULL;
+    char *file_path;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
+
+    smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
+
+    /* query long path of module from fd */
+    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    if (buffer) {
+        file_path = smith_get_file_path(fd, buffer, PATH_MAX);
+    } else {
+        file_path = NULL;
+    }
+
+    do_init_module_print(exe_path, file_path, pid_tree, pname);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
+    smith_kfree(pname_buf);
+    smith_kfree(buffer);
+    return;
 }
 
 static int update_cred_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-    char *exe_path = NULL;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     char *pid_tree = NULL;
+    char *exe_path = DEFAULT_RET_STR;
     struct cred *cred;
     int new_uid, old_uid;
 
@@ -3814,16 +3544,21 @@ static int update_cred_pre_handler(struct kprobe *p, struct pt_regs *regs)
     if (new_uid != 0 || old_uid == 0)
         return 0;
 
-    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-    exe_path = smith_get_exe_file(buffer, PATH_MAX);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
 
-    pid_tree = smith_get_pid_tree(PID_TREE_LIMIT);
+    smith_check_privilege_escalation(PID_TREE_LIMIT, pid_tree);
     update_cred_print(exe_path, pid_tree, old_uid, 0);
 
-    if (buffer)
-        smith_kfree(buffer);
-    if (pid_tree)
-        smith_kfree(pid_tree);
+out:
+    if (tid)
+        smith_put_tid(tid);
 
     return 0;
 }
@@ -3831,124 +3566,33 @@ static int update_cred_pre_handler(struct kprobe *p, struct pt_regs *regs)
 static int smith_usb_ncb(struct notifier_block *nb, unsigned long val, void *priv)
 {
     char *exe_path = DEFAULT_RET_STR;
-    char *buffer = NULL;
+    struct smith_tid *tid = NULL;
     struct usb_device *udev;
 
     if (IS_ERR_OR_NULL(priv))
         return 0;
 
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
     udev = (struct usb_device *)priv;
     if (USB_DEVICE_ADD == val) {
-        buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-        exe_path = smith_get_exe_file(buffer, PATH_MAX);
         udev_print(exe_path, udev->product, udev->manufacturer, udev->serial, 1);
     } else if (USB_DEVICE_REMOVE == val){
-        buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
-        exe_path = smith_get_exe_file(buffer, PATH_MAX);
         udev_print(exe_path, udev->product, udev->manufacturer, udev->serial, 2);
     }
 
-    if (buffer)
-        smith_kfree(buffer);
+out:
+    if (tid)
+        smith_put_tid(tid);
 
     return NOTIFY_OK;
 }
-
-static int connect_syscall_entry_handler(struct kretprobe_instance *ri,
-                                  struct pt_regs *regs)
-{
-    struct connect_syscall_data *data;
-    data = (struct connect_syscall_data *)ri->data;
-    data->fd = p_get_arg1_syscall(regs);
-    data->dirp = (struct sockaddr *)p_get_arg2_syscall(regs);
-    return 0;
-}
-
-static int tcp_v4_connect_entry_handler(struct kretprobe_instance *ri,
-                                 struct pt_regs *regs)
-{
-    struct connect_data *data;
-    data = (struct connect_data *)ri->data;
-    data->sa_family = AF_INET;
-    // type 1 for TCPv4
-    data->type = 1;
-    data->sk = (struct sock *)p_regs_get_arg1(regs);
-    return 0;
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-static int tcp_v6_connect_entry_handler(struct kretprobe_instance *ri,
-				 struct pt_regs *regs)
-{
-	struct connect_data *data;
-	data = (struct connect_data *)ri->data;
-	data->sa_family = AF_INET6;
-	// type 2 for TCPv6
-	data->type = 2;
-	data->sk = (struct sock *)p_regs_get_arg1(regs);
-	return 0;
-}
-#endif
-
-static int ip4_datagram_connect_entry_handler(struct kretprobe_instance *ri,
-                                       struct pt_regs *regs)
-{
-    struct connect_data *data;
-    data = (struct connect_data *)ri->data;
-    data->sa_family = AF_INET;
-    // type 3 for UDPv4
-    data->type = 3;
-    data->sk = (struct sock *)p_regs_get_arg1(regs);
-    return 0;
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-static int ip6_datagram_connect_entry_handler(struct kretprobe_instance *ri,
-				       struct pt_regs *regs)
-{
-	struct connect_data *data;
-	data = (struct connect_data *)ri->data;
-	data->sa_family = AF_INET6;
-	// type 4 for UDPv6
-	data->type = 4;
-	data->sk = (struct sock *)p_regs_get_arg1(regs);
-	return 0;
-}
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-static struct kretprobe execveat_kretprobe = {
-	    .kp.symbol_name = P_GET_SYSCALL_NAME(execveat),
-	    .entry_handler = execveat_entry_handler,
-	    .data_size = sizeof(struct execve_data),
-	    .handler = execve_handler,
-};
-#endif
-
-static struct kretprobe execve_kretprobe = {
-        .kp.symbol_name = P_GET_SYSCALL_NAME(execve),
-        .entry_handler = execve_entry_handler,
-        .data_size = sizeof(struct execve_data),
-        .handler = execve_handler,
-};
-
-#ifdef CONFIG_COMPAT
-static struct kretprobe compat_execve_kretprobe = {
-	    .kp.symbol_name = P_GET_COMPAT_SYSCALL_NAME(execve),
-	    .entry_handler = compat_execve_entry_handler,
-	    .data_size = sizeof(struct execve_data),
-	    .handler = execve_handler,
-};
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,19,0)
-static struct kretprobe compat_execveat_kretprobe = {
-	    .kp.symbol_name = P_GET_COMPAT_SYSCALL_NAME(execveat),
-	    .entry_handler = compat_execveat_entry_handler,
-	    .data_size = sizeof(struct execve_data),
-	    .handler = execve_handler,
-};
-#endif /* >= 3.19.0 */
-#endif /* CONFIG_COMPAT */
 
 static struct kprobe call_usermodehelper_exec_kprobe = {
         .symbol_name = "call_usermodehelper_exec",
@@ -3970,67 +3614,6 @@ static struct kprobe link_kprobe = {
         .pre_handler = link_pre_handler,
 };
 
-static struct kprobe ptrace_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(ptrace),
-        .pre_handler = ptrace_pre_handler,
-};
-
-#if IS_ENABLED(CONFIG_IPV6)
-static struct kretprobe ip6_datagram_connect_kretprobe = {
-	    .kp.symbol_name = "ip6_datagram_connect",
-	    .data_size = sizeof(struct connect_data),
-	    .handler = connect_handler,
-	    .entry_handler = ip6_datagram_connect_entry_handler,
-};
-
-static struct kretprobe tcp_v6_connect_kretprobe = {
-	    .kp.symbol_name = "tcp_v6_connect",
-	    .data_size = sizeof(struct connect_data),
-	    .handler = connect_handler,
-	    .entry_handler = tcp_v6_connect_entry_handler,
-};
-#endif
-
-static struct kretprobe ip4_datagram_connect_kretprobe = {
-        .kp.symbol_name = "ip4_datagram_connect",
-        .data_size = sizeof(struct connect_data),
-        .handler = connect_handler,
-        .entry_handler = ip4_datagram_connect_entry_handler,
-};
-
-static struct kretprobe tcp_v4_connect_kretprobe = {
-        .kp.symbol_name = "tcp_v4_connect",
-        .data_size = sizeof(struct connect_data),
-        .handler = connect_handler,
-        .entry_handler = tcp_v4_connect_entry_handler,
-};
-
-static struct kretprobe connect_syscall_kretprobe = {
-        .kp.symbol_name = P_GET_SYSCALL_NAME(connect),
-        .data_size = sizeof(struct connect_syscall_data),
-        .handler = connect_syscall_handler,
-        .entry_handler = connect_syscall_entry_handler,
-};
-
-static struct kretprobe accept_kretprobe = {
-        .kp.symbol_name = P_GET_SYSCALL_NAME(accept),
-        .data_size = sizeof(struct accept_data),
-        .handler = accept_handler,
-        .entry_handler = accept_entry_handler,
-};
-
-static struct kretprobe accept4_kretprobe = {
-        .kp.symbol_name = P_GET_SYSCALL_NAME(accept4),
-        .data_size = sizeof(struct accept_data),
-        .handler = accept_handler,
-        .entry_handler = accept4_entry_handler,
-};
-
-static struct kprobe do_init_module_kprobe = {
-        .symbol_name = "do_init_module",
-        .pre_handler = do_init_module_pre_handler,
-};
-
 static struct kprobe update_cred_kprobe = {
         .symbol_name = "commit_creds",
         .pre_handler = update_cred_pre_handler,
@@ -4041,33 +3624,9 @@ static struct kprobe security_inode_create_kprobe = {
         .pre_handler = security_inode_create_pre_handler,
 };
 
-static struct kretprobe bind_kretprobe = {
-        .kp.symbol_name = P_GET_SYSCALL_NAME(bind),
-        .data_size = sizeof(struct bind_data),
-        .handler = bind_handler,
-        .entry_handler = bind_entry_handler,
-};
-
 static struct kprobe mprotect_kprobe = {
         .symbol_name = "security_file_mprotect",
         .pre_handler = mprotect_pre_handler,
-};
-
-static struct kprobe setsid_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(setsid),
-        .pre_handler = setsid_pre_handler,
-};
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-static struct kprobe memfd_create_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(memfd_create),
-        .pre_handler = memfd_create_kprobe_pre_handler,
-};
-#endif
-
-static struct kprobe prctl_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(prctl),
-        .pre_handler = prctl_pre_handler,
 };
 
 static struct kprobe open_kprobe = {
@@ -4078,21 +3637,6 @@ static struct kprobe open_kprobe = {
 static struct kprobe openat_kprobe = {
         .symbol_name = P_GET_SYSCALL_NAME(openat),
         .pre_handler = openat_pre_handler,
-};
-
-static struct kprobe kill_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(kill),
-        .pre_handler = kill_pre_handler,
-};
-
-static struct kprobe tkill_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(tkill),
-        .pre_handler = tkill_pre_handler,
-};
-
-static struct kprobe nanosleep_kprobe = {
-        .symbol_name = P_GET_SYSCALL_NAME(nanosleep),
-        .pre_handler = nanosleep_pre_handler,
 };
 
 static struct kprobe write_kprobe = {
@@ -4126,6 +3670,44 @@ static struct notifier_block smith_usb_notifier = {
         .notifier_call = smith_usb_ncb,
 };
 
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 3, 0)
+
+static void smith_update_comm(struct smith_tid *tid, char *comm_new);
+
+/*
+ * 3.16 and later:
+ * void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec);
+ *
+ * pre 3.16:
+ * void set_task_comm(struct task_struct *tsk, char *buf);
+ */
+static int set_task_comm_pre_handler(struct kprobe *kp, struct pt_regs *regs)
+{
+    struct task_struct *task = (void *)p_regs_get_arg1(regs);
+    struct smith_tid *tid = NULL;
+
+    /* ignore __set_task_comm callings in exec */
+    if (kp->symbol_name[0] == '_' && (char)p_regs_get_arg3(regs))
+        return 0;
+
+    tid = smith_lookup_tid(task);
+    if (tid) {
+        if (task->tgid == task->pid)
+            smith_update_comm(tid, (char *)p_regs_get_arg2(regs));
+        smith_put_tid(tid);
+    }
+
+    return 0;
+}
+
+struct kprobe  set_task_comm_kprobe = {
+        .symbol_name = "__set_task_comm",
+        .pre_handler = set_task_comm_pre_handler,
+};
+
+#endif
+
 /*
  * set minimal of maxactive as 32 to avoid possible missings
  * of kretprobe events, especially for NON-PREEMPTED systems
@@ -4147,29 +3729,13 @@ static void smith_unregister_kretprobe(struct kretprobe *kr)
     kr->kp.addr = NULL;
 }
 
-static int register_bind_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&bind_kretprobe);
-
-    if (ret == 0)
-        bind_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_bind_kprobe(void)
-{
-    smith_unregister_kretprobe(&bind_kretprobe);
-}
-
 static int register_call_usermodehelper_exec_kprobe(void)
 {
     int ret;
     ret = register_kprobe(&call_usermodehelper_exec_kprobe);
 
     if (ret == 0)
-       call_usermodehelper_exec_kprobe_state= 0x1;
+        call_usermodehelper_exec_kprobe_state = 0x1;
 
     return ret;
 }
@@ -4243,204 +3809,6 @@ static void unregister_link_kprobe(void)
     unregister_kprobe(&link_kprobe);
 }
 
-static int register_execve_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&execve_kretprobe);
-    if (ret == 0)
-        execve_kretprobe_state = 0x1;
-
-    return ret;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-static int register_execveat_kprobe(void)
-{
-	int ret;
-	ret = smith_register_kretprobe(&execveat_kretprobe);
-	if (ret == 0)
-		execveat_kretprobe_state = 0x1;
-
-	return ret;
-}
-#endif
-
-#ifdef CONFIG_COMPAT
-static int register_compat_execve_kprobe(void)
-{
-	int ret;
-	ret = smith_register_kretprobe(&compat_execve_kretprobe);
-	if (ret == 0)
-		compat_execve_kretprobe_state = 0x1;
-
-	return ret;
-}
-
-static void unregister_compat_execve_kprobe(void)
-{
-	smith_unregister_kretprobe(&compat_execve_kretprobe);
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-static int register_compat_execveat_kprobe(void)
-{
-	int ret;
-	ret = smith_register_kretprobe(&compat_execveat_kretprobe);
-	if (ret == 0)
-		compat_execveat_kretprobe_state = 0x1;
-
-	return ret;
-}
-
-static void unregister_compat_execveat_kprobe(void)
-{
-	smith_unregister_kretprobe(&compat_execveat_kretprobe);
-}
-#endif
-#endif
-
-static void unregister_execve_kprobe(void)
-{
-    smith_unregister_kretprobe(&execve_kretprobe);
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-static void unregister_execveat_kprobe(void)
-{
-	smith_unregister_kretprobe(&execveat_kretprobe);
-}
-#endif
-
-static int register_ptrace_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&ptrace_kprobe);
-
-    if (ret == 0)
-        ptrace_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_ptrace_kprobe(void)
-{
-    unregister_kprobe(&ptrace_kprobe);
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-static int register_ip6_datagram_connect_kprobe(void)
-{
-	int ret;
-	ret = smith_register_kretprobe(&ip6_datagram_connect_kretprobe);
-
-	if (ret == 0)
-		ip6_datagram_connect_kprobe_state = 0x1;
-
-	return ret;
-}
-
-static void unregister_ip6_datagram_connect_kprobe(void)
-{
-	smith_unregister_kretprobe(&ip6_datagram_connect_kretprobe);
-}
-
-static int register_tcp_v6_connect_kprobe(void)
-{
-	int ret;
-	ret = smith_register_kretprobe(&tcp_v6_connect_kretprobe);
-
-	if (ret == 0)
-		tcp_v6_connect_kprobe_state = 0x1;
-
-	return ret;
-}
-
-static void unregister_tcp_v6_connect_kprobe(void)
-{
-	smith_unregister_kretprobe(&tcp_v6_connect_kretprobe);
-}
-#endif
-
-static int register_ip4_datagram_connect_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&ip4_datagram_connect_kretprobe);
-
-    if (ret == 0)
-        ip4_datagram_connect_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_ip4_datagram_connect_kprobe(void)
-{
-    smith_unregister_kretprobe(&ip4_datagram_connect_kretprobe);
-}
-
-static int register_tcp_v4_connect_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&tcp_v4_connect_kretprobe);
-
-    if (ret == 0)
-        tcp_v4_connect_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_tcp_v4_connect_kprobe(void)
-{
-    smith_unregister_kretprobe(&tcp_v4_connect_kretprobe);
-}
-
-static int register_connect_syscall_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&connect_syscall_kretprobe);
-
-    if (ret == 0)
-        connect_syscall_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_connect_syscall_kprobe(void)
-{
-    smith_unregister_kretprobe(&connect_syscall_kretprobe);
-}
-
-static int register_accept_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&accept_kretprobe);
-
-    if (ret == 0)
-        accept_kretprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_accept_kprobe(void)
-{
-    smith_unregister_kretprobe(&accept_kretprobe);
-}
-
-static int register_accept4_kprobe(void)
-{
-    int ret;
-    ret = smith_register_kretprobe(&accept4_kretprobe);
-
-    if (ret == 0)
-        accept4_kretprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_accept4_kprobe(void)
-{
-    smith_unregister_kretprobe(&accept4_kretprobe);
-}
-
 static int register_create_file_kprobe(void)
 {
     int ret;
@@ -4469,72 +3837,6 @@ static int register_mount_kprobe(void)
 static void unregister_mount_kprobe(void)
 {
     unregister_kprobe(&mount_kprobe);
-}
-
-static int register_do_init_module_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&do_init_module_kprobe);
-
-    if (ret == 0)
-        do_init_module_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_do_init_module_kprobe(void)
-{
-    unregister_kprobe(&do_init_module_kprobe);
-}
-
-static int register_setsid_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&setsid_kprobe);
-
-    if (ret == 0)
-        setsid_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_setsid_kprobe(void)
-{
-    unregister_kprobe(&setsid_kprobe);
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-static int register_memfd_create_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&memfd_create_kprobe);
-
-    if (ret == 0)
-        memfd_create_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_memfd_create_kprobe(void)
-{
-    unregister_kprobe(&memfd_create_kprobe);
-}
-#endif
-
-static int register_prctl_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&prctl_kprobe);
-
-    if (ret == 0)
-        prctl_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_prctl_kprobe(void)
-{
-    unregister_kprobe(&prctl_kprobe);
 }
 
 static int register_update_cred_kprobe(void)
@@ -4597,21 +3899,6 @@ static void unregister_openat_kprobe(void)
     unregister_kprobe(&openat_kprobe);
 }
 
-static int register_nanosleep_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&nanosleep_kprobe);
-    if (ret == 0)
-        nanosleep_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_nanosleep_kprobe(void)
-{
-    unregister_kprobe(&nanosleep_kprobe);
-}
-
 static int register_security_path_rmdir_kprobe(void)
 {
     int ret;
@@ -4642,36 +3929,6 @@ static void unregister_security_path_unlink_kprobe(void)
     smith_unregister_kretprobe(&security_path_unlink_kprobe);
 }
 
-static int register_kill_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&kill_kprobe);
-    if (ret == 0)
-        kill_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_kill_kprobe(void)
-{
-    unregister_kprobe(&kill_kprobe);
-}
-
-static int register_tkill_kprobe(void)
-{
-    int ret;
-    ret = register_kprobe(&tkill_kprobe);
-    if (ret == 0)
-        tkill_kprobe_state = 0x1;
-
-    return ret;
-}
-
-static void unregister_tkill_kprobe(void)
-{
-    unregister_kprobe(&tkill_kprobe);
-}
-
 static int register_write_kprobe(void)
 {
     int ret;
@@ -4687,8 +3944,13 @@ static void unregister_write_kprobe(void)
     unregister_kprobe(&write_kprobe);
 }
 
-static void uninstall_kprobe(void)
+static void smith_fini_kprobe(void)
 {
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 3, 0)
+    unregister_kprobe(&set_task_comm_kprobe);
+#endif
+
     if (UDEV_HOOK == 1) {
         static void (*smith_usb_unregister_notify) (struct notifier_block * nb);
         smith_usb_unregister_notify = (void *)__symbol_get("usb_unregister_notify");
@@ -4698,47 +3960,17 @@ static void uninstall_kprobe(void)
         }
     }
 
-    if (bind_kprobe_state == 0x1)
-        unregister_bind_kprobe();
-
-    if (connect_syscall_kprobe_state == 0x1)
-        unregister_connect_syscall_kprobe();
-
     if (call_usermodehelper_exec_kprobe_state == 0x1)
         unregister_call_usermodehelper_exec_kprobe();
 
     if (mprotect_kprobe_state == 0x1)
         unregister_mprotect_kprobe();
 
-    if (execve_kretprobe_state == 0x1)
-        unregister_execve_kprobe();
-
-    if (ptrace_kprobe_state == 0x1)
-        unregister_ptrace_kprobe();
-
     if (create_file_kprobe_state == 0x1)
         unregister_create_file_kprobe();
 
-    if (do_init_module_kprobe_state == 0x1)
-        unregister_do_init_module_kprobe();
-
     if (update_cred_kprobe_state == 0x1)
         unregister_update_cred_kprobe();
-
-    if (setsid_kprobe_state == 0x1)
-        unregister_setsid_kprobe();
-
-    if (tcp_v4_connect_kprobe_state == 0x1)
-        unregister_tcp_v4_connect_kprobe();
-
-    if (tcp_v6_connect_kprobe_state == 0x1)
-        unregister_tcp_v6_connect_kprobe();
-
-    if (ip4_datagram_connect_kprobe_state == 0x1)
-        unregister_ip4_datagram_connect_kprobe();
-
-    if (ip6_datagram_connect_kprobe_state == 0x1)
-        unregister_ip6_datagram_connect_kprobe();
 
     if (mount_kprobe_state == 0x1)
         unregister_mount_kprobe();
@@ -4749,34 +3981,11 @@ static void uninstall_kprobe(void)
     if (rename_kprobe_state == 0x1)
         unregister_rename_kprobe();
 
-    if (prctl_kprobe_state == 0x1)
-        unregister_prctl_kprobe();
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-    if (memfd_create_kprobe_state == 0x1)
-        unregister_memfd_create_kprobe();
-#endif
-
-    if (accept_kretprobe_state == 0x1)
-        unregister_accept_kprobe();
-
-    if (accept4_kretprobe_state == 0x1)
-        unregister_accept4_kprobe();
-
     if (open_kprobe_state == 0x1)
         unregister_open_kprobe();
 
     if (openat_kprobe_state == 0x1)
         unregister_openat_kprobe();
-
-    if (nanosleep_kprobe_state == 0x1)
-        unregister_nanosleep_kprobe();
-
-    if (kill_kprobe_state == 0x1)
-        unregister_kill_kprobe();
-
-    if (tkill_kprobe_state == 0x1)
-        unregister_tkill_kprobe();
 
     if (exit_kprobe_state == 0x1)
         unregister_exit_kprobe();
@@ -4792,23 +4001,9 @@ static void uninstall_kprobe(void)
 
     if (link_kprobe_state == 0x1)
         unregister_link_kprobe();
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-    if (execveat_kretprobe_state == 0x1)
-		unregister_execveat_kprobe();
-#endif
-
-#ifdef CONFIG_COMPAT
-    if (compat_execve_kretprobe_state == 0x1)
-        unregister_compat_execve_kprobe();
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-    if (compat_execveat_kretprobe_state == 0x1)
-	    unregister_compat_execveat_kprobe();
-#endif
-#endif
 }
 
-static void __init install_kprobe(void)
+static void smith_init_kprobe(void)
 {
     int ret;
 
@@ -4833,16 +4028,6 @@ static void __init install_kprobe(void)
             printk(KERN_INFO "[ELKEID] security_path_unlink register_kprobe failed, returned %d\n", ret);
     }
 
-    if (ACCEPT_HOOK == 1) {
-        ret = register_accept_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] open accept_kprobe failed, returned %d\n", ret);
-
-        ret = register_accept4_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] open accept4_kprobe failed, returned %d\n", ret);
-    }
-
     if (OPEN_HOOK == 1) {
         ret = register_open_kprobe();
         if (ret < 0)
@@ -4851,24 +4036,6 @@ static void __init install_kprobe(void)
         ret = register_openat_kprobe();
         if (ret < 0)
             printk(KERN_INFO "[ELKEID] openat register_kprobe failed, returned %d\n", ret);
-    }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0)
-    if (MEMFD_CREATE_HOOK == 1) {
-        ret = register_memfd_create_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] memfd_create register_kprobe failed, returned %d\n", ret);
-    }
-#endif
-
-    if (KILL_HOOK == 1) {
-        ret = register_kill_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] kill register_kprobe failed, returned %d\n", ret);
-
-        ret = register_tkill_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] tkill register_kprobe failed, returned %d\n", ret);
     }
 
     if (WRITE_HOOK == 1) {
@@ -4887,60 +4054,10 @@ static void __init install_kprobe(void)
             printk(KERN_INFO "[ELKEID] exit_group register_kprobe failed, returned %d\n", ret);
     }
 
-    if (NANOSLEEP_HOOK == 1) {
-        ret = register_nanosleep_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] nanosleep register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (CONNECT_HOOK == 1) {
-        ret = register_connect_syscall_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] connect register_kprobe failed, returned %d\n", ret);
-
-        if (!connect_syscall_kprobe_state) {
-            ret = register_tcp_v4_connect_kprobe();
-            if (ret < 0)
-                printk(KERN_INFO "[ELKEID] connect register_kprobe failed, returned %d\n", ret);
-
-            ret = register_ip4_datagram_connect_kprobe();
-            if (ret < 0)
-                printk(KERN_INFO "[ELKEID] ip4_datagram_connect register_kprobe failed, returned %d\n", ret);
-
-#if IS_ENABLED(CONFIG_IPV6)
-            ret = register_tcp_v6_connect_kprobe();
-            if (ret < 0)
-                printk(KERN_INFO "[ELKEID] tcp_v6_connect register_kprobe failed, returned %d\n", ret);
-
-            ret = register_ip6_datagram_connect_kprobe();
-            if (ret < 0)
-                printk(KERN_INFO "[ELKEID] ip6_datagram_connect register_kprobe failed, returned %d\n", ret);
-#endif
-        }
-    }
-
     if (MPROTECT_HOOK == 1) {
         ret = register_mprotect_kprobe();
         if (ret < 0)
             printk(KERN_INFO "[ELKEID] mprotect register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (PRCTL_HOOK == 1) {
-        ret = register_prctl_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] prctl register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (SETSID_HOOK == 1) {
-        ret = register_setsid_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] setsid register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (BIND_HOOK == 1) {
-        ret = register_bind_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] bind register_kprobe failed, returned %d\n", ret);
     }
 
     if (MOUNT_HOOK == 1) {
@@ -4967,46 +4084,10 @@ static void __init install_kprobe(void)
             printk(KERN_INFO "[ELKEID] create_file register_kprobe failed, returned %d\n", ret);
     }
 
-    if (EXECVE_HOOK == 1) {
-        ret = register_execve_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] execve register_kprobe failed, returned %d\n", ret);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-        ret = register_execveat_kprobe();
-		if (ret < 0)
-			printk(KERN_INFO "[ELKEID] execveat register_kprobe failed, returned %d\n", ret);
-#endif
-
-#ifdef CONFIG_COMPAT
-        ret = register_compat_execve_kprobe();
-		if (ret < 0)
-			printk(KERN_INFO "[ELKEID] compat_sys_execve register_kprobe failed, returned %d\n", ret);
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 19, 0)
-		ret = register_compat_execveat_kprobe();
-		if (ret < 0)
-			printk(KERN_INFO "[ELKEID] compat_sys_execveat register_kprobe failed, returned %d\n", ret);
-#endif
-#endif
-    }
-
     if (USERMODEHELPER_HOOK == 1) {
         ret = register_call_usermodehelper_exec_kprobe();
         if (ret < 0)
             printk(KERN_INFO "[ELKEID] call_usermodehelper_exec register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (PTRACE_HOOK == 1) {
-        ret = register_ptrace_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] ptrace register_kprobe failed, returned %d\n", ret);
-    }
-
-    if (MODULE_LOAD_HOOK == 1) {
-        ret = register_do_init_module_kprobe();
-        if (ret < 0)
-            printk(KERN_INFO "[ELKEID] do_init_module register_kprobe failed, returned %d\n", ret);
     }
 
     if (UPDATE_CRED_HOOK == 1) {
@@ -5014,7 +4095,3016 @@ static void __init install_kprobe(void)
         if (ret < 0)
             printk(KERN_INFO "[ELKEID] update_cred register_kprobe failed, returned %d\n", ret);
     }
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 3, 0)
+    /*
+     * try __set_task_comm first, then set_task_comm. kernels >= 3.16 should work
+     * with __set_task_comm, and the 2nd try should work for kernels < 3.16
+     */
+    if (register_kprobe(&set_task_comm_kprobe)) {
+        set_task_comm_kprobe.symbol_name = &set_task_comm_kprobe.symbol_name[2];
+        register_kprobe(&set_task_comm_kprobe);
+    }
+#endif
 }
+
+/*
+ * rbtree defs for exectuable images
+ */
+static struct tt_rb g_rb_img;  /* rbtree of cached images */
+static LIST_HEAD(g_lru_img);   /* lru list of cached images */
+
+#define SMITH_IMG_REAPER_TIMEOUT  (60 * 5)   /* 5 minutes */
+#define SMITH_IMG_MAX_INSTANCES   (2048)     /* max cached imgs */
+
+/*
+ * callbacks for img-cache
+ */
+
+static char *smith_build_path(struct smith_img *img)
+{
+    char *buf = img->si_buf, *path;
+    int len = SI_IMG_LENGTH;
+
+    /* better d_absolute_path, but it's not exported */
+    path = d_path(&img->si_exe->f_path, buf, img->si_max);
+    while (IS_ERR(path) && len <= PATH_MAX) {
+        buf = smith_kmalloc(len, GFP_ATOMIC);
+        if (!buf)
+            break;
+        /* d_absolute_path */
+        path = d_path(&img->si_exe->f_path, buf, len);
+        /* got ERR_PTR(-ENAMETOOLONG) */
+        if (!IS_ERR(path)) {
+            img->si_max = len;
+            img->si_alloc = buf;
+            break;
+        }
+        kfree(buf);
+        len += 128;
+    }
+
+    if (IS_ERR(path))
+        return NULL;
+
+    return path;
+}
+
+static int smith_build_img(struct smith_img *img)
+{
+    struct dentry *de;
+
+    de = img->si_exe->f_path.dentry;
+    img->si_max = SI_IMG_BUFLEN;
+    img->si_sb = de->d_sb;
+    img->si_ino = de->d_inode->i_ino;
+    img->si_size = i_size_read(de->d_inode);
+    img->si_path = smith_build_path(img);
+    if (!img->si_path)
+        return -ENOMEM;
+    img->si_len = (uint16_t)strlen(img->si_path);
+    img->si_murmur64 = hash_murmur_OAAT64(img->si_path, img->si_len);
+
+    return 0;
+}
+
+static struct tt_node *smith_init_img(struct tt_rb *rb, void *key)
+{
+    struct smith_img *img;
+
+    img = (struct smith_img *)tt_rb_alloc_node(rb);
+    if (img) {
+        tt_memcpy(img, key, offsetof(struct smith_img, si_age));
+        /* initialize pid (binding to its tid) */
+        if (smith_build_img(img)) {
+            tt_rb_free_node(rb, &img->si_node);
+            return 0;
+        }
+        INIT_LIST_HEAD(&img->si_link);
+        atomic_set(&img->si_node.refs, 0);
+        img->si_age = 0;
+        return &img->si_node;
+    }
+
+    return NULL;
+}
+
+static int smith_cmp_img(struct tt_rb *rb, struct tt_node *tnod, void *key)
+{
+    struct tt_node *node = key;
+    struct smith_img *img1, *img2;
+
+    img1 = container_of(tnod, struct smith_img, si_node);
+    img2 = container_of(node, struct smith_img, si_node);
+    if (img2->si_ino > img1->si_ino)
+        return 1;
+    if (img2->si_ino < img1->si_ino)
+        return -1;
+    if (img2->si_size > img1->si_size)
+        return 1;
+    if (img2->si_size < img1->si_size)
+        return -1;
+    if (img2->si_sb > img1->si_sb)
+        return 1;
+    if (img2->si_sb < img1->si_sb)
+        return -1;
+    return 0;
+}
+
+static void smith_release_img(struct tt_rb *rb, struct tt_node *tnod)
+{
+    struct smith_img *img = container_of(tnod, struct smith_img, si_node);
+    list_del(&img->si_link);
+    if (img->si_max > SI_IMG_BUFLEN)
+        kfree(img->si_alloc);
+    tt_rb_free_node(rb, tnod);
+}
+
+/*
+ * img-cache support routines
+ */
+static int smith_drop_head_img(int count)
+{
+    struct list_head *link, *prev = NULL;
+    struct smith_img *img;
+    unsigned long flags;
+    int rc = 0, dropped;
+
+    write_lock_irqsave(&g_rb_img.lock, flags);
+    do {
+        if (list_empty(&g_lru_img))
+            break;
+
+        link = g_lru_img.next;
+        img = list_entry(link, struct smith_img, si_link);
+        if (link == prev)
+            break;
+        prev = link;
+        /* it doesn't timeout yet, so continue and wait */
+        if (smith_get_delta(0) < img->si_age &&
+            count < (SMITH_IMG_MAX_INSTANCES << 4))
+            break;
+
+        /* img hasn't been touched for seconds */
+        list_del_init(&img->si_link);
+        if (0 == atomic_read(&img->si_node.refs)) {
+            /* remove this img from rbtree */
+            tt_rb_remove_node_nolock(&g_rb_img, &img->si_node);
+            dropped = 1;
+        } else {
+            img->si_age = smith_get_delta(SMITH_IMG_REAPER_TIMEOUT);
+            list_add_tail(&img->si_link, &g_lru_img);
+            dropped = 0;
+        }
+        rc += dropped;
+    } while (count-- > SMITH_IMG_MAX_INSTANCES || dropped);
+    write_unlock_irqrestore(&g_rb_img.lock, flags);
+
+    return rc;
+}
+
+static void smith_drop_head_imgs(struct tt_rb *rb)
+{
+    smith_drop_head_img(atomic_read(&rb->count));
+}
+
+static void smith_put_img(struct smith_img *img)
+{
+    atomic_dec(&img->si_node.refs);
+
+    if (!in_interrupt())
+        smith_drop_head_imgs(&g_rb_img);
+}
+
+static int smith_file2img(struct file *filp, struct smith_img *img)
+{
+    struct dentry *de;
+
+    if (!filp)
+        return -ENOENT;
+    img->si_exe = filp;
+
+    de = img->si_exe->f_path.dentry;
+    img->si_sb = de->d_sb;
+    img->si_ino = file_inode(filp)->i_ino;
+    img->si_size = i_size_read(file_inode(filp));
+
+    return 0;
+}
+
+static int smith_task2img(struct task_struct *task, struct smith_img *img)
+{
+    struct file *filp = smith_get_task_exe_file(task);
+
+    if (!filp)
+        return -ENOENT;
+
+    return smith_file2img(filp, img);
+}
+
+static struct smith_img *smith_find_img(struct smith_img *img)
+{
+    struct smith_img *si = NULL;
+    struct tt_node *tnod = NULL;
+    unsigned long flags;
+
+    /* check whether the image was already inserted ? */
+    read_lock_irqsave(&g_rb_img.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_img, img);
+    if (tnod) {
+        atomic_inc(&tnod->refs);
+        read_unlock_irqrestore(&g_rb_img.lock, flags);
+        si = container_of(tnod, struct smith_img, si_node);
+        goto errorout;
+    } else {
+        read_unlock_irqrestore(&g_rb_img.lock, flags);
+    }
+
+    /* insert new node to rbtree */
+    write_lock_irqsave(&g_rb_img.lock, flags);
+    tnod = tt_rb_insert_key_nolock(&g_rb_img, &img->si_node);
+    if (tnod) {
+        si = container_of(tnod, struct smith_img, si_node);
+        atomic_inc(&tnod->refs);
+        list_del_init(&si->si_link);
+        si->si_age = smith_get_delta(SMITH_IMG_REAPER_TIMEOUT);
+        list_add_tail(&si->si_link, &g_lru_img);
+    }
+    write_unlock_irqrestore(&g_rb_img.lock, flags);
+
+errorout:
+    return si;
+}
+
+static struct smith_img *smith_find_task_img(struct task_struct *task)
+{
+    struct smith_img img, *si = NULL;
+
+    memset(&img, 0, sizeof(img));
+    if (!smith_task2img(task, &img))
+        si = smith_find_img(&img);
+
+    /* si_exe grabbed by smith_task2img */
+    if (img.si_exe)
+        smith_fput(img.si_exe);
+
+    return si;
+}
+
+static struct smith_img *smith_find_file_img(struct file *filp)
+{
+    struct smith_img img, *si = NULL;
+
+    memset(&img, 0, sizeof(img));
+    if (!smith_file2img(filp, &img))
+        si = smith_find_img(&img);
+
+    return si;
+}
+
+static void smith_show_img(struct tt_node *tnod)
+{
+    struct smith_img *img;
+
+    if (!tnod)
+        return;
+
+    img = container_of(tnod, struct smith_img, si_node);
+    printk("img: %px sb: %px ino: %lu lru age: %u now: %u refs: %d -> %s\n",
+            img, img->si_sb, img->si_ino, img->si_age, smith_get_delta(0),
+            atomic_read(&img->si_node.refs), img->si_path);
+}
+
+static void smith_enum_img(void)
+{
+    printk("enum all imgs (%d):\n", atomic_read(&g_rb_img.count));
+    tt_rb_enum(&g_rb_img, smith_show_img);
+}
+
+static void smith_enum_img_lru(void)
+{
+    struct list_head *link;
+    struct smith_img *img;
+    unsigned long flags;
+
+    printk("enum all imgs in lru (%d):\n", atomic_read(&g_rb_img.count));
+    read_lock_irqsave(&g_rb_img.lock, flags);
+    link = g_lru_img.next;
+    while (link != &g_lru_img) {
+        img = list_entry(link, struct smith_img, si_link);
+        link = link->next;
+        smith_show_img(&img->si_node);
+    }
+    read_unlock_irqrestore(&g_rb_img.lock, flags);
+}
+
+/* FMODE_CREATED added since v4.19 */
+#ifdef FMODE_CREATED
+# define SMITH_FILE_CREATION_TRACK 0
+#else
+# define SMITH_FILE_CREATION_TRACK 1
+#endif
+
+#if SMITH_FILE_CREATION_TRACK
+
+/*****************************************
+ *  cache for newly created file entries *
+ *****************************************/
+
+/*
+ * rbtree defs for newly created entries
+ */
+static struct tt_rb g_rb_ent;  /* rbtree of cached ents */
+static LIST_HEAD(g_lru_ent);   /* lru list of cached ents */
+
+#define SMITH_ENT_REAPER (60)         /* 60 seconds */
+#define SMITH_ENT_MAX    (1UL << 16)  /* max pathes to be cached */
+
+static int smith_build_ent(struct smith_ent *ent, struct smith_ent *obj)
+{
+    uint16_t len = ent->se_len = obj->se_len;
+    if (len >= SE_ENT_BUFLEN) {
+        ent->se_path = smith_kzalloc(len + 1, GFP_ATOMIC);
+        if (!ent->se_path)
+            return -EINVAL;
+    } else {
+        ent->se_path = ent->se_buf;
+    }
+    strncpy(ent->se_path, obj->se_path, len + 1);
+    ent->se_hash = obj->se_hash;
+    ent->se_age = smith_get_delta(SMITH_ENT_REAPER);
+    ent->se_tgid = current->tgid;
+
+    return 0;
+}
+
+static struct tt_node *smith_init_ent(struct tt_rb *rb, void *key)
+{
+    struct tt_node *node = key;
+    struct smith_ent *ent, *obj;
+
+    ent = (struct smith_ent *)tt_rb_alloc_node(rb);
+    if (ent) {
+        /* initialize file entry */
+        obj = container_of(node, struct smith_ent, se_node);
+        if (smith_build_ent(ent, obj)) {
+            tt_rb_free_node(rb, &ent->se_node);
+            return 0;
+        }
+        INIT_LIST_HEAD(&ent->se_link);
+        atomic_set(&ent->se_node.refs, 0);
+        return &ent->se_node;
+    }
+
+    return NULL;
+}
+
+static int smith_cmp_ent(struct tt_rb *rb, struct tt_node *tnod, void *key)
+{
+    struct tt_node *node = key;
+    struct smith_ent *ent1, *ent2;
+
+    ent1 = container_of(tnod, struct smith_ent, se_node);
+    ent2 = container_of(node, struct smith_ent, se_node);
+    if (ent2->se_hash > ent1->se_hash)
+        return 1;
+    if (ent2->se_hash < ent1->se_hash)
+        return -1;
+    if (ent2->se_len < ent1->se_len)
+        return 1;
+    if (ent2->se_len < ent1->se_len)
+        return -1;
+    return 0;
+}
+
+static void smith_release_ent(struct tt_rb *rb, struct tt_node *tnod)
+{
+    struct smith_ent *ent = container_of(tnod, struct smith_ent, se_node);
+    list_del(&ent->se_link);
+    if (ent->se_len >= SE_ENT_BUFLEN)
+        kfree(ent->se_path);
+    ent->se_path = NULL;
+    tt_rb_free_node(rb, tnod);
+}
+
+/*
+ * support routines for entry cache of newly-created files
+ */
+
+static int smith_drop_head_ent(int count)
+{
+    struct list_head *link;
+    struct smith_ent *ent;
+    unsigned long flags;
+    int rc = 0;
+
+    if (count <= 0) {
+        read_lock_irqsave(&g_rb_ent.lock, flags);
+        if (!list_empty(&g_lru_ent)) {
+            link = g_lru_ent.next;
+            ent = list_entry(link, struct smith_ent, se_link);
+            if (smith_get_delta(0) > ent->se_age)
+                count = 1;
+        }
+        read_unlock_irqrestore(&g_rb_ent.lock, flags);
+    }
+
+    if (count <= 0)
+        goto errout;
+
+    write_lock_irqsave(&g_rb_ent.lock, flags);
+    while (count--) {
+        if (list_empty(&g_lru_ent))
+            break;
+        link = g_lru_ent.next;
+        ent = list_entry(link, struct smith_ent, se_link);
+        /* remove entry from lru list */
+        list_del_init(&ent->se_link);
+        /* this entry hasn't been touched for seconds */
+        /* so remove the ent from rbtree and drop it */
+        tt_rb_remove_node_nolock(&g_rb_ent, &ent->se_node);
+        rc++;
+    }
+    write_unlock_irqrestore(&g_rb_ent.lock, flags);
+
+errout:
+    return rc;
+}
+
+static void smith_drop_head_ents(struct tt_rb *rb)
+{
+    smith_drop_head_ent(atomic_read(&rb->count) - SMITH_ENT_MAX);
+}
+
+static void smith_prepare_ent(char *path, struct smith_ent *ent)
+{
+    memset(ent, 0, sizeof(*ent));
+    ent->se_path = path;
+    ent->se_len = strlen(path);
+    ent->se_hash = hash_murmur_OAAT64(path, ent->se_len);
+}
+
+int smith_insert_ent(char *path)
+{
+    struct smith_ent obj, *ent;
+    struct tt_node *tnod = NULL;
+    unsigned long flags;
+
+    /* init obj */
+    smith_prepare_ent(path, &obj);
+
+    /* check whether the entry was already inserted ? */
+    read_lock_irqsave(&g_rb_ent.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_ent, &obj);
+    read_unlock_irqrestore(&g_rb_ent.lock, flags);
+    if (tnod)
+        goto out;
+
+    /* insert new node to rbtree */
+    write_lock_irqsave(&g_rb_ent.lock, flags);
+    tnod = tt_rb_insert_key_nolock(&g_rb_ent, &obj.se_node);
+    if (tnod) {
+        ent = container_of(tnod, struct smith_ent, se_node);
+        /* remove ent from LRU if it's already LRUed */
+        list_del_init(&ent->se_link);
+        ent->se_age = smith_get_delta(SMITH_ENT_REAPER);
+        /* insert ent to the tail of LRU list */
+        list_add_tail(&ent->se_link, &g_lru_ent);
+    }
+    write_unlock_irqrestore(&g_rb_ent.lock, flags);
+
+    /* drop stale entries */
+    smith_drop_head_ents(&g_rb_ent);
+
+out:
+    return (!!tnod);
+}
+
+int smith_remove_ent(char *path)
+{
+    struct smith_ent obj, *ent;
+    struct tt_node *tnod = NULL;
+    unsigned long flags;
+
+    /* init obj */
+    smith_prepare_ent(path, &obj);
+
+    /* check whether the entry was already inserted ? */
+    read_lock_irqsave(&g_rb_ent.lock, flags);
+    tnod = tt_rb_lookup_nolock(&g_rb_ent, &obj);
+    read_unlock_irqrestore(&g_rb_ent.lock, flags);
+    if (!tnod)
+        goto out;
+
+    write_lock_irqsave(&g_rb_ent.lock, flags);
+    /* do 2nd search to assure it's in lru list */
+    tnod = tt_rb_lookup_nolock(&g_rb_ent, &obj);
+    if (tnod) {
+        ent = container_of(tnod, struct smith_ent, se_node);
+        list_del_init(&ent->se_link);
+        tt_rb_remove_node_nolock(&g_rb_ent, tnod);
+    }
+    write_unlock_irqrestore(&g_rb_ent.lock, flags);
+
+out:
+    smith_drop_head_ents(&g_rb_ent);
+    return (!!tnod);
+}
+
+static void smith_show_ent(struct tt_node *tnod)
+{
+    struct smith_ent *ent;
+
+    if (!tnod)
+        return;
+
+    ent = container_of(tnod, struct smith_ent, se_node);
+    printk("ent: %px (%s) refs: %d pid: %u.\n", ent,
+            ent->se_path, atomic_read(&ent->se_node.refs),
+            (uint32_t)ent->se_tgid);
+}
+
+void smith_enum_ent(void)
+{
+    unsigned long flags;
+
+    printk("smith_enum_ent: newly created ents (%u):\n",
+            atomic_read(&g_rb_ent.count));
+    read_lock_irqsave(&g_rb_ent.lock, flags);
+    tt_rb_enum(&g_rb_ent, smith_show_ent);
+    read_unlock_irqrestore(&g_rb_ent.lock, flags);
+    printk("smith_enum_ent: done\n");
+}
+
+#else
+
+int smith_insert_ent(char *path)
+{
+    return 1;
+}
+
+int smith_remove_ent(char *path)
+{
+    return 1;
+}
+
+#endif /* SMITH_FILE_CREATION_TRACK */
+
+static int smith_is_anchor(struct task_struct *task)
+{
+    struct {int len; char *name;} anchors[] = {
+        /* ordered via len, max is TASK_COMM_LEN (16) */
+        {4, "sshd"},
+        {5, "login"},
+        {15, "containerd-shim"},
+             /* k8s ? */
+
+        {0, 0} /* the end */
+    };
+    int len, i;
+
+    /* systemd / init */
+    if (NULL == task || task->pid == 1)
+        return 1;
+
+    len = strnlen(task->comm, TASK_COMM_LEN);
+    if (len <= 0)
+        return 0;
+
+    for (i = 0; anchors[i].name; i++) {
+        if (len < anchors[i].len)
+            break;
+        if (len == anchors[i].len &&
+            0 == strncmp(anchors[i].name, task->comm, len))
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * hash lists for all active tasks
+ */
+static struct hlist_root g_hlist_tid;
+
+/* query mntns id */
+uint64_t smith_query_mntns(void)
+{
+    struct smith_tid tid;
+
+    if (0 == hlist_query_key(&g_hlist_tid, current, &tid))
+        return tid.st_root;
+
+    return smith_query_mntns_id(current);
+}
+
+/* query the original session id */
+int smith_query_tid(struct task_struct *task)
+{
+    struct smith_tid tid;
+    int rc = -1;
+
+    if (0 == hlist_query_key(&g_hlist_tid, task, &tid))
+        rc = tid.st_sid;
+
+    return rc;
+}
+
+struct smith_tid *smith_lookup_tid(struct task_struct *task)
+{
+    struct smith_tid *tid = NULL;
+    struct hlist_hnod *nod;
+
+    nod = hlist_lookup_key(&g_hlist_tid, task);
+    if (nod)
+        tid = container_of(nod, struct smith_tid, st_node);
+
+    return tid;
+}
+
+int smith_put_tid(struct smith_tid *tid)
+{
+    int rc = 0;
+    if (tid)
+        rc = hlist_deref_node(&g_hlist_tid, &tid->st_node);
+    return rc;
+}
+
+int smith_drop_tid(struct task_struct *task)
+{
+    return hlist_remove_key(&g_hlist_tid, task);
+}
+
+/*
+ * callbacks routines for tid
+ */
+
+static int smith_query_parents(struct task_struct *task)
+{
+    struct task_struct *old_task;
+    int i = 0;
+
+    get_task_struct(task);
+
+    while (task && task->pid != 0) {
+        i++;
+        old_task = task;
+        rcu_read_lock();
+        task = smith_get_task_struct(rcu_dereference(task->real_parent));
+        rcu_read_unlock();
+        smith_put_task_struct(old_task);
+    }
+
+    if (task)
+        smith_put_task_struct(task);
+
+    return i;
+}
+
+#define PID_TREE_METADATA_LEN (10 /* len of max uint32_t */ + 2 + 16 /* TASK_COMM_LEN */ + 4 /* rounded to 32 */)
+static char *smith_build_pid_tree(struct smith_tid *tid, struct task_struct *task)
+{
+    char pid[PID_TREE_METADATA_LEN];
+    char *tree = NULL;
+    int n, rc;
+
+    get_task_struct(task);
+    n = smith_query_parents(task);
+    if (n > PID_TREE_LIMIT)
+        n = PID_TREE_LIMIT;
+    if (n < 1)
+        n = 1;
+
+    tree = smith_kzalloc(n * PID_TREE_METADATA_LEN, GFP_ATOMIC);
+    if (!tree)
+        goto out;
+    tid->st_pid_tree = tree;
+    tid->st_size_pidtree = n * PID_TREE_METADATA_LEN;
+
+    rc = snprintf(tree, PID_TREE_METADATA_LEN, "%u.%.16s", task->tgid, task->comm);
+    if (rc <= 0 || rc >= PID_TREE_METADATA_LEN)
+        goto out;
+    tid->st_len_pidtree = tid->st_len_current_pid = (uint16_t)rc;
+
+    while (--n > 0) {
+
+        struct task_struct *old_task = task;
+        rcu_read_lock();
+        task = smith_get_task_struct(rcu_dereference(task->real_parent));
+        rcu_read_unlock();
+        smith_put_task_struct(old_task);
+        if (!task || task->pid == 0)
+            break;
+
+        rc = snprintf(pid, PID_TREE_METADATA_LEN, "<%u.%.16s", task->tgid, task->comm);
+        if (rc <= 0 || rc >= PID_TREE_METADATA_LEN)
+            break;
+        strcat(tree, pid);
+        tid->st_len_pidtree += (uint16_t)rc;
+    }
+
+out:
+    if (task)
+        smith_put_task_struct(task);
+
+    return tree;
+}
+
+static void smith_update_protected(struct smith_tid *tid, struct task_struct *task) {
+    const char *exe_path = NULL;
+    struct smith_img *img = NULL;
+
+    if (tid->protected)
+        return;
+
+    // Consider that img->si_exe is unsafe (because we don't have its reference),
+    // so we use img->si_path to check if the process is protected here.
+    img = smith_find_task_img(task);
+    if (img) {
+        exe_path = img->si_path;
+        if (check_exe_path_is_protected(exe_path)) {
+            tid->protected = 1;
+            //pr_info("set protected: %d for %d\n", tid->protected, tid->st_tgid);
+        }
+        smith_put_img(img);
+    }
+}
+
+static void smith_set_protected(struct smith_tid *tid, struct task_struct *task) {
+    struct task_struct *parent = NULL;
+    struct smith_tid *parent_tid = NULL;
+
+    tid->protected = 0;
+
+    // 1st, check if the process is protected.
+    smith_update_protected(tid, task);
+    if (tid->protected) return;
+
+    // 2nd, check if its parent is protected, and inherit its protection status.
+    rcu_read_lock();
+    parent = smith_get_task_struct(rcu_dereference(task->real_parent));
+    rcu_read_unlock();
+
+    parent_tid = smith_lookup_tid(parent);
+    smith_put_task_struct(parent);
+
+    if (parent_tid) {
+        tid->protected = parent_tid->protected; // Inherited from the parent
+        smith_put_tid(parent_tid);
+        //pr_info("set protected: %d for %d inherited from %d\n", tid->protected, task->tgid, parent_tid->st_tgid);
+    }
+}
+
+static void smith_update_comm(struct smith_tid *tid, char *comm_new)
+{
+    char pid[PID_TREE_METADATA_LEN];
+    char *tree = tid->st_pid_tree;
+    int n, o = tid->st_len_current_pid, l = tid->st_len_pidtree;
+
+    if (!tree || l < o || l <= 0 || l >= tid->st_size_pidtree)
+        return;
+
+    /* comm_new could be longer than TASK_COMM_LEN */
+    n = snprintf(pid, PID_TREE_METADATA_LEN, "%u.%.16s", tid->st_tgid, comm_new);
+    if (n <= 0 || n >= PID_TREE_METADATA_LEN || l - o + n >= tid->st_size_pidtree)
+        return;
+
+    if (o != n)
+        memmove(tree + n, tree + o, l - o + 1); /* extra tailing 0 */
+    memcpy(tree, pid, n);
+    tid->st_len_pidtree = l - o + n;
+    tid->st_len_current_pid = n;
+}
+
+static int smith_build_tid(struct smith_tid *tid, struct task_struct *task)
+{
+    tid->st_start = smith_task_start_time(task);
+    tid->st_tgid = task->tgid;
+    /* flags was already inited during allocation */
+    tid->st_node.flag_newsid = smith_is_anchor(task->parent);
+    tid->st_sid = task_session_nr_ns(task, &init_pid_ns);
+    tid->st_img = smith_find_task_img(task);
+    if (!tid->st_img)
+        return -ENOMEM;
+    smith_build_pid_tree(tid, task);
+    tid->st_root = smith_query_mntns_id(task);
+    smith_set_protected(tid, task); // set tid->protected
+    return 0;
+}
+
+static struct hlist_hnod *smith_init_tid(struct hlist_root *hr, void *key)
+{
+    struct task_struct *task = key;
+    struct hlist_hnod *hnod;
+    struct smith_tid *tid;
+
+    hnod = hlist_alloc_node(hr);
+    if (hnod) {
+        tid = container_of(hnod, struct smith_tid, st_node);
+        if (!smith_build_tid(tid, task))
+            return &tid->st_node;
+        hlist_free_node(hr, &tid->st_node);
+    }
+
+    return NULL;
+}
+
+static int smith_cmp_tid(struct hlist_root *hr, struct hlist_hnod *hnod, void *key)
+{
+    struct task_struct *task = key;
+    struct smith_tid *tid;
+
+    tid = container_of(hnod, struct smith_tid, st_node);
+    return (tid->st_tgid != task->tgid);
+}
+
+static void smith_release_tid(struct hlist_root *hr, struct hlist_hnod *hnod)
+{
+    struct smith_tid *tid = container_of(hnod, struct smith_tid, st_node);
+
+    if (unlikely(!hnod))
+        return;
+
+    /* dereference st_img */
+    if (tid->st_img)
+        smith_put_img(tid->st_img);
+    if (tid->st_pid_tree)
+        smith_kfree(tid->st_pid_tree);
+    hlist_free_node(hr, hnod);
+}
+
+static int smith_insert_tid(struct task_struct *task)
+{
+    /* alloc tid and insert to tid hash lists */
+    return !hlist_insert_key(&g_hlist_tid, task);
+}
+
+static void smith_show_tid(struct hlist_hnod *hnod)
+{
+    struct smith_tid *tid;
+
+    if (!hnod)
+        return;
+
+    tid = container_of(hnod, struct smith_tid, st_node);
+    printk("tgid: %u sid: %u task: %s mnt: %llu img: %px\n",
+            tid->st_tgid, tid->st_sid, tid->st_pid_tree,
+            tid->st_root, tid->st_img);
+}
+
+static void smith_enum_tid(void)
+{
+    printk("enum all tids (%d):\n", atomic_read(&g_hlist_tid.count));
+    hlist_enum(&g_hlist_tid, smith_show_tid);
+}
+
+static int smith_hash_tid(struct hlist_root *hr, void *key)
+{
+    struct task_struct *task = key;
+    return (task->tgid & hr->nlists);
+}
+
+static void smith_process_tasks(struct hlist_root *hr)
+{
+    struct task_struct *task;
+    unsigned long flags;
+
+    /* rcu lock is enough since we are only reading tasklist */
+    rcu_read_lock();
+    hlist_lock(hr, flags);
+    for_each_process(task) {
+        /* skip kernel threads and tasks being shut donw */
+        if (task->flags & (PF_KTHREAD | PF_EXITING))
+            continue;
+        /* only process group_leader */
+        if (task->pid != task->tgid)
+            continue;
+        hlist_insert_key_nolock(hr, task);
+    }
+    hlist_unlock(hr, flags);
+    rcu_read_unlock();
+}
+
+/*
+ * sched/process tracepoints support routines
+ */
+
+#include <linux/tracepoint.h>
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 35))
+    #define TRACEPOINT_PROBE_REGISTER(p1, p2) tracepoint_probe_register(p1, p2)
+    #define TRACEPOINT_PROBE_UNREGISTER(p1, p2) tracepoint_probe_unregister(p1, p2)
+    #define TRACEPOINT_PROBE(probe, args...) static void probe(args)
+#else
+    #define TRACEPOINT_PROBE_REGISTER(p1, p2) tracepoint_probe_register(p1, p2, NULL)
+    #define TRACEPOINT_PROBE_UNREGISTER(p1, p2) tracepoint_probe_unregister(p1, p2, NULL)
+    #define TRACEPOINT_PROBE(probe, args...) static void probe(void *__data, args)
+#endif
+
+TRACEPOINT_PROBE(smith_trace_proc_fork,
+                 struct task_struct *self,
+                 struct task_struct *task)
+{
+    /* skip kernel threads */
+    if (task->flags & PF_KTHREAD)
+        return;
+    /* only process group leader */
+    if (task->pid != task->tgid)
+        return;
+    smith_insert_tid(task);
+}
+
+/*
+ * Tracepoint sched_process_exec is only available for v3.4 and later kernels;
+ * For earlier kernels, we have to register kretprobe handler and call manually.
+ */
+static void smith_trace_proc_exec(
+                     void *data,
+                     struct task_struct *task,
+                     pid_t pid,
+                     struct linux_binprm *bprm)
+{
+    struct smith_tid *tid = NULL;
+    struct smith_img *img = NULL, *exe;
+
+    /* already inserted ? */
+    tid = smith_lookup_tid(task);
+    if (!tid)
+        goto errorout;
+
+    /* build img for execed task */
+    exe = smith_find_task_img(task);
+    if (exe) {
+        /* update st_img with new execed image */
+        img = tid->st_img;
+        rcu_assign_pointer(tid->st_img, exe);
+    }
+
+    /* update pid tree strings */
+    if (task->tgid == task->pid) {
+        smith_update_comm(tid, task->comm);
+        smith_update_protected(tid, task);
+    }
+
+errorout:
+    if (img)
+        smith_put_img(img);
+    if (tid)
+        smith_put_tid(tid);
+
+/*
+ * Workaround for ARM64:
+ *
+ * sys_exit tracepoint events for successful execve or execveat syscalls will be
+ * bypassed. Failed execve or execveat still have notification callbacks.
+ *
+ * Here we are using process_exec tracepoint as a supplement to handle exec events.
+ * Luckily that kernels with ARM64 support are newer than 3.4.
+ *
+ * This bug is to be fixed in 5.20 and later, more details:
+ * 1) https://git.kernel.org/pub/scm/linux/kernel/git/arm64/linux.git/commit/?id=de6921856f99
+ * 2) https://github.com/iovisor/bcc/pull/3982
+ */
+
+#if defined(CONFIG_ARM64) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 20, 0)
+    /* Workaround for ARM64: lack of sys_exit tracing for execve */
+    if (EXECVE_HOOK)
+        smith_trace_sysret_exec(0);
+#endif
+
+    return;
+}
+
+/*
+ * Process exec notifier: workaround for earlier kernels (< 3.4)
+ */
+static void smith_trace_proc_execve(struct task_struct *task)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 4, 0)
+    smith_trace_proc_exec(NULL, task, task->pid, NULL);
+#endif
+}
+
+TRACEPOINT_PROBE(smith_trace_proc_exit, struct task_struct *task)
+{
+    /* skip kernel threads */
+    if (task->flags & PF_KTHREAD)
+        return;
+
+    /* only process group leader */
+    if (task->pid != task->tgid)
+        return;
+
+    /* try to cleanup current taks's tid record */
+    smith_drop_tid(task);
+}
+
+#include <linux/thread_info.h>
+#include <asm/syscall.h> /* syscall_get_nr() */
+#include <asm/unistd.h> /* __NR_syscall defintions */
+
+
+#if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_IA32_EMULATION)
+
+/* only for x86 systems */
+static void smith_trace_sysexit_x86(struct pt_regs *regs, long id, long ret)
+{
+    switch (id) {
+
+        /*
+         * exec related: context of execved task
+         */
+        case 11 /* __NR_ia32_execve */ :
+        case 358 /* __NR_ia32_execveat */:
+            /*
+             * sched_process_exec emulation for earlier kernels (3.4).
+             * execve returns -1 on error
+             */
+            if (ret >= 0)
+                smith_trace_proc_execve(current);
+
+            if (EXECVE_HOOK)
+                smith_trace_sysret_exec(ret);
+            break;
+
+        /*
+         * ptrace: PTRACE_POKETEXT and PTRACE_POKEDATA
+         */
+        case 26 /* __NR_ia32_ptrace */:
+            if (PTRACE_HOOK)
+                smith_trace_sysret_ptrace(regs->bx, regs->cx,
+                                          (void *)regs->dx, ret);
+            break;
+
+        /*
+         * task kill / tkill / tgkill
+         */
+        case 37 /* __NR_ia32_kill */:
+            if (KILL_HOOK)
+                smith_trace_sysret_kill(regs->bx, regs->cx, ret);
+            break;
+        case 238 /* __NR_ia32_tkill */:
+            if (KILL_HOOK)
+                smith_trace_sysret_tkill(regs->bx, regs->cx, ret);
+            break;
+        case 270 /* __NR_ia32_tgkill */:
+            if (KILL_HOOK)
+                smith_trace_sysret_tgkill(regs->bx, regs->cx, regs->dx, ret);
+            break;
+
+        /*
+         * chmod operations
+         */
+        case 15 /* __NR_ia32_chmod */:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_chmod((char __user *)regs->bx, regs->cx, ret);
+            break;
+        case 94 /* __NR_ia32_fchmod */:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmod(regs->bx, regs->cx, ret);
+            break;
+       case 306 /* __NR_ia32_fchmodat */:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmodat(regs->bx, (char *)regs->cx, regs->dx, ret);
+            break;
+
+        /*
+         * nanosleep
+         */
+        case 162 /* __NR_ia32_nanosleep */:
+            if (NANOSLEEP_HOOK)
+                smith_trace_sysret_nanosleep(regs->bx);
+            break;
+
+        /*
+         * memfd_create
+         */
+        case 356 /* __NR_ia32_memfd_create */:
+            if (MEMFD_CREATE_HOOK)
+                smith_trace_sysret_memfd_create((char __user *)regs->bx, regs->cx, ret);
+            break;
+
+        /*
+         * module insmod
+         */
+        case 128: /* __NR_ia32_init_module */
+            if (MODULE_LOAD_HOOK)
+                smith_trace_sysret_init_module((char __user *)regs->bx, regs->cx, ret);
+        break;
+
+        case 350: /* __NR_ia32_finit_module */
+            if (MODULE_LOAD_HOOK)
+                smith_trace_sysret_finit_module(regs->bx, ret);
+        break;
+
+        /*
+         * socket related
+         */
+
+        case 102 /* __NR_ia32_socketcall */:
+            if (CONNECT_HOOK && SYS_CONNECT == regs->bx) {
+                int32_t ua[3];
+                if (copy_from_user(ua, (void *)regs->cx, sizeof(ua)))
+                    break;
+                smith_trace_sysret_connect(ua[0], ua[1], ua[2], ret);
+            } else if (DNS_HOOK && ret >= 20 && (SYS_RECV == regs->bx ||
+                                                 SYS_RECVFROM == regs->bx ||
+                                                 SYS_RECVMSG == regs->bx)) {
+                int32_t ua[2];
+                if (copy_from_user(ua, (void *)regs->cx, sizeof(ua)))
+                    break;
+                if (SYS_RECVMSG == regs->bx)
+                    smith_trace_sysret_recvmsg((long)ua[0], (long)ua[1], ret);
+                else
+                    smith_trace_sysret_recvdat((long)ua[0], (long)ua[1], ret);
+            } else if (DNS_HOOK && SYS_RECVMMSG == regs->bx) {
+            } else if (BIND_HOOK && SYS_BIND == regs->bx) {
+                int32_t sockfd;
+                if (copy_from_user(&sockfd, (void *)regs->cx, sizeof(sockfd)))
+                    break;
+                smith_trace_sysret_bind(sockfd, ret);
+            } else if (ACCEPT_HOOK && (SYS_ACCEPT == regs->bx ||
+                                       SYS_ACCEPT4 == regs->bx)) {
+                smith_trace_sysret_accept(ret);
+            }
+            break;
+
+        case 361 /* __NR_ia32_bind */:
+            if (BIND_HOOK)
+                smith_trace_sysret_bind(regs->bx, ret);
+            break;
+
+        case 362 /* __NR_ia32_connect */:
+            if (CONNECT_HOOK)
+                smith_trace_sysret_connect(regs->bx, regs->cx, regs->dx, ret);
+            break;
+
+        case 364 /* __NR_ia32_accept4 */:
+            if (ACCEPT_HOOK)
+                smith_trace_sysret_accept(ret);
+            break;
+
+        case 371 /* __NR_ia32_recvfrom */:
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvdat(regs->bx, regs->cx, ret);
+            break;
+        case 372 /* __NR_ia32_recvmsg */:
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvmsg(regs->bx, regs->cx, ret);
+            break;
+
+        default:
+            break;
+    }
+}
+
+#elif defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
+
+/* only for ARM64 system */
+static void smith_trace_sysexit_arm32(struct pt_regs *regs, long id, long ret)
+{
+    switch (id) {
+
+        /*
+         * exec related: context of execved task
+         */
+        case 11: /* execve */
+        case 387: /* execveat */
+            /*
+             * sched_process_exec emulation for earlier kernels (3.4).
+             * execve returns -1 on error
+             */
+            if (ret >= 0)
+                smith_trace_proc_execve(current);
+
+            if (EXECVE_HOOK)
+                smith_trace_sysret_exec(ret);
+            break;
+
+        /*
+         * ptrace: PTRACE_POKETEXT and PTRACE_POKEDATA
+         */
+        case 26: /* ptrace */
+            if (PTRACE_HOOK)
+                smith_trace_sysret_ptrace(regs->orig_x0, regs->regs[1],
+                                          (void *)regs->regs[2], ret);
+            break;
+
+        /*
+         * task kill / tkill / tgkill
+         */
+        case 37: /* kill */
+            if (KILL_HOOK)
+                smith_trace_sysret_kill(regs->orig_x0, regs->regs[1], ret);
+            break;
+        case 238: /* tkill */
+            if (KILL_HOOK)
+                smith_trace_sysret_tkill(regs->orig_x0, regs->regs[1], ret);
+            break;
+        case 268: /* tgkill */
+            if (KILL_HOOK)
+                smith_trace_sysret_tgkill(regs->orig_x0, regs->regs[1],
+                                          regs->regs[2], ret);
+            break;
+
+        /*
+         * chmod operations
+         */
+        case 15: /* chmod */
+            if (CHMOD_HOOK)
+                smith_trace_sysret_chmod((char __user *)regs->orig_x0, regs->regs[1], ret);
+            break;
+        case 94: /* fchmod */
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmod(regs->orig_x0, regs->regs[1], ret);
+            break;
+       case 333: /* fchmodat */
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmodat(regs->orig_x0, (char *)regs->regs[1],
+                                            regs->regs[2], ret);
+            break;
+
+        /*
+         * nanosleep
+         */
+        case 162: /* nanosleep */
+            if (NANOSLEEP_HOOK)
+                smith_trace_sysret_nanosleep(regs->orig_x0);
+            break;
+
+        /*
+         * memfd_create
+         */
+        case 385: /* memfd_create */
+            if (MEMFD_CREATE_HOOK)
+                smith_trace_sysret_memfd_create((char __user *)regs->orig_x0,
+                                                 regs->regs[1], ret);
+            break;
+
+        /*
+         * module insmod
+         */
+        case 128: /* nit_module */
+            if (MODULE_LOAD_HOOK)
+                smith_trace_sysret_init_module((char __user *)regs->orig_x0,
+                                               regs->regs[1], ret);
+        break;
+
+        case 379: /* finit_module */
+            if (MODULE_LOAD_HOOK)
+                smith_trace_sysret_finit_module(regs->orig_x0, ret);
+        break;
+
+        /*
+         * socket related
+         */
+#if 0   /* socketcall not implemented for ARM64 */
+        case 102: /* socketcall */
+            if (CONNECT_HOOK && SYS_CONNECT == regs->orig_x0) {
+                int32_t ua[2];
+                if (copy_from_user(ua, (void *)regs->regs[1], sizeof(ua)))
+                    break;
+                smith_trace_sysret_connect(ua[0], ua[1], ret);
+            } else if (DNS_HOOK && ret >= 20 && (SYS_RECV == regs->orig_x0 ||
+                                                 SYS_RECVFROM == regs->orig_x0 ||
+                                                 SYS_RECVMSG == regs->orig_x0)) {
+                int32_t ua[2];
+                if (copy_from_user(ua, (void *)regs->regs[1], sizeof(ua)))
+                    break;
+                if (SYS_RECVMSG == regs->orig_x0)
+                    smith_trace_sysret_recvmsg((long)ua[0], (long)ua[1], ret);
+                else
+                    smith_trace_sysret_recvdat((long)ua[0], (long)ua[1], ret);
+            } else if (DNS_HOOK && SYS_RECVMMSG == regs->orig_x0) {
+            } else if (BIND_HOOK && SYS_BIND == regs->orig_x0) {
+                int32_t sockfd;
+                if (copy_from_user(&sockfd, (void *)regs->regs[1], sizeof(sockfd)))
+                    break;
+                smith_trace_sysret_bind(sockfd, ret);
+            } else if (ACCEPT_HOOK && (SYS_ACCEPT == regs->orig_x0 ||
+                                       SYS_ACCEPT4 == regs->orig_x0)) {
+                smith_trace_sysret_accept(ret);
+            }
+            break;
+#endif
+
+        case 282: /* bind */
+            if (BIND_HOOK)
+                smith_trace_sysret_bind(regs->orig_x0, ret);
+            break;
+
+        case 283: /* connect */
+            if (CONNECT_HOOK)
+                smith_trace_sysret_connect(regs->orig_x0, regs->regs[1],
+                                           regs->regs[2], ret);
+            break;
+
+        case 285: /* accept */
+        case 366: /* accept4 */
+            if (ACCEPT_HOOK)
+                smith_trace_sysret_accept(ret);
+            break;
+
+        case 291: /* recv */
+        case 292: /* recvfrom */
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvdat(regs->orig_x0, regs->regs[1], ret);
+            break;
+        case 297: /* recvmsg */
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvmsg(regs->orig_x0, regs->regs[1], ret);
+            break;
+        case 365: /* recvmmsg */
+            break;
+
+        default:
+            break;
+    }
+}
+#endif
+
+static void smith_trace_sysent_close(long fd)
+{
+    struct smith_tid *tid = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    char *buffer = NULL;
+    char *file_path;
+    struct file *filp = smith_fget_raw(fd);
+
+    if (!filp)
+        return;
+
+#if !SMITH_FILE_CREATION_TRACK
+    if (!(filp->f_mode & FMODE_CREATED))
+        goto out;
+#endif
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
+    buffer = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    if (!buffer)
+        goto out;
+
+    file_path = smith_get_file_path(fd, buffer, PATH_MAX);
+    if (!smith_remove_ent(file_path))
+        goto out;
+
+    /* we only care about nonempty regular files */
+    if (!S_ISREG(file_inode(filp)->i_mode))
+        goto out;
+    if (!i_size_read(file_inode(filp)))
+        goto out;
+    file_creation_print(exe_path, file_path);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
+    smith_fput(filp);
+    if (buffer)
+        smith_kfree(buffer);
+}
+
+static void smith_trace_sysent_prctl(long option, char __user *name)
+{
+    struct smith_tid *tid = NULL;
+    char *exe_path = DEFAULT_RET_STR;
+    char *newname = NULL;
+    int len;
+
+    //only get PS_SET_NAME data
+    //PR_SET_NAME (since Linux 2.6.9)
+    //Set the name of the calling thread, using the value in the lo‐
+    //cation pointed to by (char *) arg2.  The name can be up to 16
+    //bytes long, including the terminating null byte.  (If the
+    //length of the string, including the terminating null byte, ex‐
+    //ceeds 16 bytes, the string is silently truncated.)
+    if (PR_SET_NAME != option || IS_ERR_OR_NULL(name))
+        return;
+
+    len = smith_strnlen_user(name, PATH_MAX);
+    if (len <= 0 || len > PATH_MAX)
+        return;
+
+    newname = smith_kzalloc(len + 1, GFP_ATOMIC);
+    if(!newname)
+        return;
+
+    if(smith_copy_from_user(newname, name, len)) {
+        smith_kfree(newname);
+        return;
+    }
+    newname[len] = '\0';
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+    }
+
+    /*
+     * pidtree to be updated in kprobe callback of set_task_comm
+     * so here we won't do smith_update_comm(tid, current->comm)
+     */
+    prctl_print(exe_path, PR_SET_NAME, newname);
+
+out:
+    smith_kfree(newname);
+    if (tid)
+        smith_put_tid(tid);
+}
+
+/* create new session id (-1 if got errors) */
+static void smith_trace_sysent_setsid(int ret)
+{
+    char *exe_path = DEFAULT_RET_STR;
+    char *pid_tree = NULL;
+    struct smith_tid *tid = NULL;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        exe_path = tid->st_img->si_path;
+        // exe filter check
+        if (smith_is_exe_trusted(tid->st_img))
+            goto out;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    setsid_print(exe_path, ret, pid_tree);
+
+out:
+    if (tid)
+        smith_put_tid(tid);
+}
+
+#if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_IA32_EMULATION)
+
+/* only for x86 systems */
+static void smith_trace_sysent_x86(struct pt_regs *regs, long id, long ret)
+{
+    switch (id) {
+
+        /*
+         * close:
+         */
+        case 6 /* __NR_ia32_close */:
+            if (CLOSE_HOOK)
+                smith_trace_sysent_close(regs->bx);
+            break;
+
+        /*
+         * create new session id
+         */
+        case 66 /*__NR_ia32_setsid */:
+            if (SETSID_HOOK)
+                smith_trace_sysent_setsid(ret);
+            break;
+
+        /*
+         * prctl: PR_SET_NAME
+         */
+        case 172 /* __NR_ia32_prctl */:
+            if (PRCTL_HOOK)
+                smith_trace_sysent_prctl(regs->bx, (char *)regs->cx);
+            break;
+    }
+}
+
+#elif defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
+
+/* only for ARM64 system */
+static void smith_trace_sysent_arm32(struct pt_regs *regs, long id, long ret)
+{
+    switch (id) {
+
+        /*
+         * close
+         */
+        case 6: /* close */
+            if (CLOSE_HOOK)
+                smith_trace_sysent_close(regs->orig_x0);
+            break;
+
+        /*
+         * create new session id
+         */
+        case 66: /* setsid */
+            if (SETSID_HOOK)
+                smith_trace_sysent_setsid(ret);
+            break;
+
+        /*
+         * prctl: PR_SET_NAME
+         */
+        case 172: /* prctl */
+            if (PRCTL_HOOK)
+                smith_trace_sysent_prctl(regs->orig_x0, (char *)regs->regs[1]);
+            break;
+    }
+}
+#endif
+
+TRACEPOINT_PROBE(smith_trace_sys_enter, struct pt_regs *regs, long ret)
+{
+    long id = syscall_get_nr(current, regs);
+
+    /* ignore all kernel threads */
+    if (current->flags & PF_KTHREAD)
+        return;
+
+#if BITS_PER_LONG == 32
+
+#if IS_ENABLED(CONFIG_X86)
+    /* 32bit OS - x86 / i386 */
+    smith_trace_sysent_x86(regs, id, ret);
+    return;
+#endif
+
+#elif BITS_PER_LONG == 64
+
+#if IS_ENABLED(CONFIG_IA32_EMULATION)
+    /*
+     * Parameters passing for x86-32 syscall:
+     * 1) %eax for syscall_number
+     * 2) %ebx, %ecx, %edx, %esi, %edi, %ebp are used for passing 6 parameters
+     * 3) if there are more than 6 arguments (very unlikely), %ebx must contain
+     *    the user memory location where the list of arguments is stored
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+    /* in_ia32_syscall(): introduced after 4.7.0 */
+    if (unlikely(in_ia32_syscall())) {
+#else
+    if (unlikely(current_thread_info()->status & TS_COMPAT)) {
+#endif
+        smith_trace_sysent_x86(regs, id, ret);
+        return;
+    }
+#endif
+
+#if defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
+    if (ESR_ELx_EC_SVC32 == ESR_ELx_EC(read_sysreg(esr_el1))) {
+        smith_trace_sysent_arm32(regs, id, ret);
+        return;
+    }
+#endif
+
+    /* 64-bit native mode: HIDS doesn't support 32bit OS */
+    switch (id) {
+
+        case __NR_close:
+            if (CLOSE_HOOK)
+                smith_trace_sysent_close(p_regs_get_arg1_of_syscall(regs));
+            break;
+
+        /*
+         * create new session id
+         */
+        case __NR_setsid:
+            if (SETSID_HOOK)
+                smith_trace_sysent_setsid(ret);
+            break;
+
+        /*
+         * prctl: PR_SET_NAME
+         */
+        case __NR_prctl:
+            if (PRCTL_HOOK)
+                smith_trace_sysent_prctl(p_regs_get_arg1_of_syscall(regs),
+                                         (char __user *)p_regs_get_arg2_syscall(regs));
+            break;
+    }
+#endif /* BITS_PER_LONG == 64 */
+}
+
+TRACEPOINT_PROBE(smith_trace_sys_exit, struct pt_regs *regs, long ret)
+{
+    long id = syscall_get_nr(current, regs);
+
+    /* ignore all kernel threads */
+    if (current->flags & PF_KTHREAD)
+        return;
+
+#if BITS_PER_LONG == 32
+
+#if IS_ENABLED(CONFIG_X86)
+    /* 32bit OS - x86 / i386 */
+    smith_trace_sysexit_x86(regs, id, ret);
+    return;
+#endif
+
+#elif BITS_PER_LONG == 64
+
+#if IS_ENABLED(CONFIG_IA32_EMULATION)
+    /*
+     * Parameters passing for x86-32 syscall:
+     * 1) %eax for syscall_number
+     * 2) %ebx, %ecx, %edx, %esi, %edi, %ebp are used for passing 6 parameters
+     * 3) if there are more than 6 arguments (very unlikely), %ebx must contain
+     *    the user memory location where the list of arguments is stored
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
+    /* in_ia32_syscall(): introduced after 4.7.0 */
+    if (unlikely(in_ia32_syscall())) {
+#else
+    if (unlikely(current_thread_info()->status & TS_COMPAT)) {
+#endif
+        smith_trace_sysexit_x86(regs, id, ret);
+        return;
+    }
+#endif
+
+#if defined(CONFIG_ARM64) && defined(CONFIG_COMPAT)
+    if (ESR_ELx_EC_SVC32 == ESR_ELx_EC(read_sysreg(esr_el1))) {
+        smith_trace_sysexit_arm32(regs, id, ret);
+        return;
+    }
+#endif
+
+    /* 64-bit native mode: HIDS doesn't support 32bit OS */
+    switch (id) {
+
+        /*
+         * exec related: context of execved task
+         */
+#ifdef       __NR_execveat
+        case __NR_execveat:
+#endif
+        case __NR_execve:
+            /*
+             * sched_process_exec emulation for earlier kernels (3.4).
+             * execve returns -1 on error
+             */
+            if (ret >= 0)
+                smith_trace_proc_execve(current);
+
+            if (EXECVE_HOOK)
+                smith_trace_sysret_exec(ret);
+            break;
+
+        /*
+         * ptrace: PTRACE_POKETEXT and PTRACE_POKEDATA
+         */
+        case __NR_ptrace:
+            if (PTRACE_HOOK)
+                smith_trace_sysret_ptrace(p_regs_get_arg1_of_syscall(regs),
+                                          p_regs_get_arg2_syscall(regs),
+                                          (void *)p_regs_get_arg3_syscall(regs),
+                                          ret);
+            break;
+
+        /*
+         * task kill / tkill / tgkill
+         */
+        case __NR_kill:
+            if (KILL_HOOK)
+                smith_trace_sysret_kill(p_regs_get_arg1_of_syscall(regs),
+                                        p_regs_get_arg2_syscall(regs),
+                                        ret);
+            break;
+        case __NR_tkill:
+            if (KILL_HOOK)
+                smith_trace_sysret_tkill(p_regs_get_arg1_of_syscall(regs),
+                                         p_regs_get_arg2_syscall(regs),
+                                         ret);
+            break;
+        case __NR_tgkill:
+            if (KILL_HOOK)
+                smith_trace_sysret_tgkill(p_regs_get_arg1_of_syscall(regs),
+                                          p_regs_get_arg2_syscall(regs),
+                                          p_regs_get_arg3_syscall(regs),
+                                          ret);
+            break;
+
+        /*
+         * chmod operations
+         */
+#ifdef       __NR_chmod
+        case __NR_chmod:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_chmod((char __user *)p_regs_get_arg1_of_syscall(regs),
+                                         p_regs_get_arg2_syscall(regs), ret);
+            break;
+#endif
+#ifdef       __NR_fchmod
+        case __NR_fchmod:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmod(p_regs_get_arg1_of_syscall(regs),
+                                          p_regs_get_arg2_syscall(regs), ret);
+            break;
+#endif
+#ifdef       __NR_fchmodat
+        case __NR_fchmodat:
+            if (CHMOD_HOOK)
+                smith_trace_sysret_fchmodat(p_regs_get_arg1_of_syscall(regs),
+                                            (char *)p_regs_get_arg2_syscall(regs),
+                                            p_regs_get_arg3_syscall(regs), ret);
+            break;
+#endif
+
+        /*
+         * nanosleep
+         */
+        case __NR_nanosleep:
+            if (NANOSLEEP_HOOK)
+                smith_trace_sysret_nanosleep(p_regs_get_arg1_of_syscall(regs));
+            break;
+
+        /*
+         * memfd_create
+         */
+#ifdef       __NR_memfd_create /* introduced by 3.17 */
+        case __NR_memfd_create:
+            if (MEMFD_CREATE_HOOK)
+                smith_trace_sysret_memfd_create(
+                    (char __user *)p_regs_get_arg1_of_syscall(regs),
+                    p_regs_get_arg2_syscall(regs), ret);
+            break;
+#endif
+
+        /*
+         * module insmod
+         */
+        case __NR_init_module:
+            if (MODULE_LOAD_HOOK) {
+                char *__mod = (char __user *)p_regs_get_arg1_of_syscall(regs);
+                int __len = p_regs_get_arg2_syscall(regs);
+                smith_trace_sysret_init_module(__mod, __len, ret);
+            }
+        break;
+#ifdef       __NR_finit_module
+        case __NR_finit_module:
+            if (MODULE_LOAD_HOOK)
+                smith_trace_sysret_finit_module(
+                    p_regs_get_arg1_of_syscall(regs), ret);
+        break;
+#endif
+
+        /*
+         * socket related
+         */
+
+#ifdef       __NR_socketcall
+        case __NR_socketcall:
+            if (CONNECT_HOOK && SYS_CONNECT == p_regs_get_arg1_of_syscall(regs)) {
+                long ua[3];
+                if (copy_from_user(ua, p_regs_get_arg2_syscall(regs), sizeof(ua)))
+                    break;
+                smith_trace_sysret_connect(ua[0], ua[1], ua[2], ret);
+            } else if (DNS_HOOK && SYS_RECV == p_regs_get_arg1_of_syscall(regs)) {
+            } else if (DNS_HOOK && SYS_RECVFROM == p_regs_get_arg1_of_syscall(regs)) {
+            } else if (DNS_HOOK && SYS_RECVMSG == p_regs_get_arg1_of_syscall(regs)) {
+            } else if (DNS_HOOK && SYS_RECVMMSG == p_regs_get_arg1_of_syscall(regs)) {
+            } else if (BIND_HOOK && SYS_BIND == p_regs_get_arg1_of_syscall(regs)) {
+                long sockfd;
+                if (copy_from_user(&sockfd, p_regs_get_arg2_syscall(regs), sizeof(sockfd)))
+                    break;
+                smith_trace_sysret_bind(sockfd, ret);
+            } else if (ACCEPT_HOOK && (SYS_ACCEPT == p_regs_get_arg1_of_syscall(regs) ||
+                                       SYS_ACCEPT4 == p_regs_get_arg1_syscall(regs))) {
+                smith_trace_sysret_accept(ret);
+            }
+
+            break;
+#endif
+
+        case __NR_bind:
+            if (BIND_HOOK)
+                smith_trace_sysret_bind(p_regs_get_arg1_of_syscall(regs), ret);
+            break;
+
+        case __NR_accept:
+        case __NR_accept4:
+            if (ACCEPT_HOOK)
+                smith_trace_sysret_accept(ret);
+            break;
+
+        case __NR_connect:
+            if (CONNECT_HOOK)
+                smith_trace_sysret_connect(p_regs_get_arg1_of_syscall(regs),
+                                           p_regs_get_arg2_syscall(regs),
+                                           p_regs_get_arg3_syscall(regs), ret);
+            break;
+
+#ifdef       __NR_recv
+        case __NR_recv:
+#endif
+        case __NR_recvfrom:
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvdat(p_regs_get_arg1_of_syscall(regs),
+                                           p_regs_get_arg2_syscall(regs), ret);
+            break;
+        case __NR_recvmsg:
+            if (DNS_HOOK && ret >= 20)
+                smith_trace_sysret_recvmsg(p_regs_get_arg1_of_syscall(regs),
+                                           p_regs_get_arg2_syscall(regs), ret);
+            break;
+
+        default:
+            break;
+    }
+#endif /* BITS_PER_LONG == 64 */
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 3, 0)
+
+TRACEPOINT_PROBE(smith_trace_task_rename,
+                 struct task_struct *task,
+                 char *buf)
+{
+    struct smith_tid *tid = NULL;
+
+    /* skip kernel threads */
+    if (task->flags & PF_KTHREAD || !buf)
+        return;
+
+    tid = smith_lookup_tid(task);
+    if (tid) {
+        if (task->tgid == task->pid)
+            smith_update_comm(tid, buf);
+        smith_put_tid(tid);
+    }
+}
+
+#endif
+
+static struct smith_tracepoint {
+    const char *name;
+    void *handler;
+    void *data;
+    struct tracepoint *control;
+} g_smith_tracepoints[] = {
+
+    /*
+     * only hook sys_exit tracepoint, since sys_enter or sys_exit will
+     * affect all syscalls, and could lead performance drop of about 3
+     * - 5%, even with noop-processing in the hookpoint callback
+     */
+    {.name = "sys_enter", .handler = smith_trace_sys_enter},
+    {.name = "sys_exit", .handler = smith_trace_sys_exit},
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 3, 0)
+    {.name = "task_rename", .handler = smith_trace_task_rename},
+#endif
+    {.name = "sched_process_exit", .handler = smith_trace_proc_exit},
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 4, 0)
+    {.name = "sched_process_exec", .handler = smith_trace_proc_exec},
+#endif
+    {.name = "sched_process_fork", .handler = smith_trace_proc_fork} };
+#define NUM_TRACE_POINTS (sizeof(g_smith_tracepoints) / sizeof(struct smith_tracepoint))
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 15, 0)
+static void smith_query_tracepoints(struct tracepoint *tp, void *ignore)
+{
+    int i;
+    for (i = 0; i < NUM_TRACE_POINTS; i++) {
+        if (strcmp(g_smith_tracepoints[i].name, tp->name) == 0)
+            g_smith_tracepoints[i].control = tp;
+    }
+}
+static int smith_assert_tracepoints(void)
+{
+    int i;
+
+    for_each_kernel_tracepoint(smith_query_tracepoints, NULL);
+    for (i = 0; i < NUM_TRACE_POINTS; i++) {
+        if (!g_smith_tracepoints[i].control)
+            return -ENOENT;
+    }
+
+    return 0;
+}
+static int smith_register_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_register(tp->control, tp->handler, tp->data);
+}
+static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_unregister(tp->control, tp->handler, tp->data);
+}
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 35)
+static int smith_assert_tracepoints(void)
+{
+    return 0;
+}
+static int smith_register_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_register(tp->name, tp->handler, tp->data);
+}
+static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_unregister(tp->name, tp->handler, tp->data);
+}
+#else
+static int smith_assert_tracepoints(void)
+{
+    return 0;
+}
+static int smith_register_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_register(tp->name, tp->handler);
+}
+static int smith_unregister_tracepoint(struct smith_tracepoint *tp)
+{
+    return tracepoint_probe_unregister(tp->name, tp->handler);
+}
+#endif
+
+static int __init smith_init_cache(void)
+{
+    int rc, nimgs, ntids;
+
+    /* check the tracepoints of our interest */
+    rc = smith_assert_tracepoints();
+    if (rc)
+        goto errorout;
+
+    /* check dns parameters */
+    smith_check_dns_params();
+
+    /* number of cached objects to be pre-allocated */
+    ntids = 64 * num_present_cpus();
+    if (ntids < 512)
+        ntids = 512;
+    if (ntids > (SMITH_IMG_MAX_INSTANCES << 1))
+        ntids = SMITH_IMG_MAX_INSTANCES << 1;
+    nimgs = SMITH_IMG_MAX_INSTANCES;
+    if (nimgs > ntids)
+        nimgs = ntids;
+
+    rc = tt_rb_init(&g_rb_img, 0, nimgs,
+                    SI_IMG_LENGTH, GFP_ATOMIC, 0,
+                    smith_init_img, smith_cmp_img,
+                    smith_release_img);
+    if (rc)
+        goto errorout;
+    rc = hlist_init(&g_hlist_tid, 0, ntids,
+                    sizeof(struct smith_tid), GFP_ATOMIC, 0,
+                    smith_init_tid, smith_hash_tid,
+                    smith_cmp_tid, smith_release_tid);
+    if (rc)
+        goto fini_rb_img;
+#if SMITH_FILE_CREATION_TRACK
+    rc = tt_rb_init(&g_rb_ent, 0, SMITH_ENT_MAX,
+                    SE_ENT_LENGTH, GFP_ATOMIC, 0,
+                    smith_init_ent, smith_cmp_ent,
+                    smith_release_ent);
+    if (rc)
+        goto fini_rb_ent;
+#endif
+    if (CONNECT_HOOK && TCPCONN_HOOK) {
+        rc = tt_rb_init(&g_rb_conn, 0, SMITH_CONN_MAX,
+                    sizeof(struct smith_conn),
+                    GFP_ATOMIC, 0,
+                    smith_init_conn, smith_cmp_conn,
+                    smith_release_conn);
+        if (rc)
+            goto fini_rb_conn;
+    }
+
+errorout:
+    return rc;
+
+fini_rb_conn:
+#if SMITH_FILE_CREATION_TRACK
+    tt_rb_fini(&g_rb_ent);
+fini_rb_ent:
+#endif
+    hlist_fini(&g_hlist_tid);
+fini_rb_img:
+    tt_rb_fini(&g_rb_img);
+
+    return rc;
+}
+
+static void smith_fini_cache(void)
+{
+    /* release conn before tid since conn could refer tid */
+    if (CONNECT_HOOK && TCPCONN_HOOK)
+        tt_rb_fini(&g_rb_conn);
+
+    hlist_fini(&g_hlist_tid);
+    tt_rb_fini(&g_rb_img);
+#if SMITH_FILE_CREATION_TRACK
+    tt_rb_fini(&g_rb_ent);
+#endif
+}
+
+static int __init smith_init_trace(void)
+{
+    int i, rc;
+
+    if (CONNECT_HOOK && TCPCONN_HOOK) {
+        /* finialize g_rb_conn and release all resources */
+        if (register_tcp_connect_kprobe()) {
+            WRITE_ONCE(TCPCONN_HOOK, 0);
+            tt_rb_fini(&g_rb_conn);
+        }
+    }
+
+    /* register callbacks for the tracepoints of our interest */
+    for (i = 0; i < NUM_TRACE_POINTS; i++) {
+        rc = smith_register_tracepoint(&g_smith_tracepoints[i]);
+        if (rc)
+            goto clean_trace;
+    }
+
+    /* enum active tasks and build tid for each user task */
+    smith_process_tasks(&g_hlist_tid);
+
+    return rc;
+
+clean_trace:
+    while (--i >= 0)
+        smith_unregister_tracepoint(&g_smith_tracepoints[i]);
+    if (tcp_connect_kprobe_state)
+        unregister_tcp_connect_kprobe();
+
+    return rc;
+}
+
+static void __init smith_fini_trace(void)
+{
+    int i;
+
+    /* cleanup callbacks for the tracepoints of our interest */
+    for (i = NUM_TRACE_POINTS; i > 0; i--)
+        smith_unregister_tracepoint(&g_smith_tracepoints[i - 1]);
+
+    /* unregister tcp_connect kprobes */
+    if (tcp_connect_kprobe_state)
+        unregister_tcp_connect_kprobe();
+}
+
+
+static void __init smith_init_systemd_ns(void)
+{
+    struct pid *pid_struct;
+    struct task_struct *task;
+    struct path root;
+
+    pid_struct = find_get_pid(1);
+    if (!pid_struct)
+        return;
+    task = smith_get_pid_task(pid_struct, PIDTYPE_PID);
+    if (!task) {
+        put_pid(pid_struct);
+        return;
+    }
+    root = task->fs->root;
+    if (root.mnt)
+        ROOT_MNT_SB = root.mnt->mnt_sb;
+    if (task->nsproxy)
+        ROOT_MNT_NS = task->nsproxy->mnt_ns;
+    ROOT_MNT_NS_ID = smith_query_mntns_id(task);
+    smith_put_task_struct(task);
+    put_pid(pid_struct);
+}
+
+/*
+ * netfilter nf_hooks for port-scan attack detection
+ */
+#define TCP_FLAG_NUL __constant_cpu_to_be32(0x80000000)
+static unsigned long g_psad_flags = TCP_FLAG_SYN;
+
+static unsigned int smith_nf_psad_v4_handler(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
+                    void *priv,
+                    struct sk_buff *skb,
+                    const struct nf_hook_state *state
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
+                    const struct nf_hook_ops *ops,
+                    struct sk_buff *skb,
+                    const struct nf_hook_state *state
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
+                    const struct nf_hook_ops *ops,
+                    struct sk_buff *skb,
+                    const struct net_device *in,
+                    const struct net_device *out,
+                    int (*okfn)(struct sk_buff *)
+#else
+                    unsigned int hooknum,
+                    struct sk_buff *skb,
+                    const struct net_device *in,
+                    const struct net_device *out,
+                    int (*okfn)(struct sk_buff *)
+#endif
+    )
+{
+    const struct iphdr *iph = ip_hdr(skb);
+    const struct tcphdr *tcp;
+    u32 len;
+    int flags = 0;
+
+    if (iph->protocol != IPPROTO_TCP)
+        goto out;
+    len = ntohs(iph->tot_len);
+    if (len > skb->len || sizeof(*iph) + sizeof(*tcp) > skb->len)
+        goto out;
+    tcp = (struct tcphdr *)(iph + 1) /* tcp_hdr(skb) */;
+
+    flags |= (tcp->syn ? TCP_FLAG_SYN : 0) |
+             (tcp->fin ? TCP_FLAG_FIN : 0) |
+             (tcp->rst ? TCP_FLAG_RST : 0) |
+             (tcp->urg ? TCP_FLAG_URG : 0) |
+             (tcp->ack ? TCP_FLAG_ACK : 0) |
+             (tcp->psh ? TCP_FLAG_PSH : 0);
+    if (flags) {
+        if (!(flags & g_psad_flags))
+            goto out;
+    } else {
+        if (!(g_psad_flags & TCP_FLAG_NUL))
+            goto out;
+    }
+
+    /* skip if src or dst are in allowlist */
+    if (g_flt_ops.ipv4_check(iph->saddr))
+        goto out;
+    if (g_flt_ops.ipv4_check(iph->daddr))
+        goto out;
+
+    /* report the malicious scanning */
+    psad4_print(iph->saddr, ntohs(tcp->source),
+                iph->daddr, ntohs(tcp->dest), flags);
+
+out:
+    return NF_ACCEPT;
+}
+
+#if IS_ENABLED(CONFIG_IPV6)
+static unsigned int smith_nf_psad_v6_handler(
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0)
+                    void *priv,
+                    struct sk_buff *skb,
+                    const struct nf_hook_state *state
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
+                    const struct nf_hook_ops *ops,
+                    struct sk_buff *skb,
+                    const struct nf_hook_state *state
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 13, 0)
+                    const struct nf_hook_ops *ops,
+                    struct sk_buff *skb,
+                    const struct net_device *in,
+                    const struct net_device *out,
+                    int (*okfn)(struct sk_buff *)
+#else
+                    unsigned int hooknum,
+                    struct sk_buff *skb,
+                    const struct net_device *in,
+                    const struct net_device *out,
+                    int (*okfn)(struct sk_buff *)
+#endif
+    )
+{
+    const struct ipv6hdr *iph = ipv6_hdr(skb);
+    const struct tcphdr *tcp;
+    u32 len;
+    int flags = 0;
+
+    if (iph->version != 6)
+        goto out;
+    if (iph->nexthdr != 6 /* NEXTHDR_TCP */)
+        goto out;
+    len = ntohs(iph->payload_len);
+    if (len + sizeof(*iph) > skb->len || sizeof(*iph) + sizeof(*tcp) > skb->len)
+        goto out;
+    tcp = (struct tcphdr *)(iph + 1) /* tcp_hdr(skb) */;
+
+    flags |= (tcp->syn ? TCP_FLAG_SYN : 0) |
+             (tcp->fin ? TCP_FLAG_FIN : 0) |
+             (tcp->rst ? TCP_FLAG_RST : 0) |
+             (tcp->urg ? TCP_FLAG_URG : 0) |
+             (tcp->ack ? TCP_FLAG_ACK : 0) |
+             (tcp->psh ? TCP_FLAG_PSH : 0);
+    if (flags) {
+        if (!(flags & g_psad_flags))
+            goto out;
+    } else {
+        if (!(g_psad_flags & TCP_FLAG_NUL))
+            goto out;
+    }
+
+    /* skip if src or dst are in allowlist */
+    if (g_flt_ops.ipv6_check((uint32_t *)&iph->saddr))
+        goto out;
+    if (g_flt_ops.ipv6_check((uint32_t *)&iph->daddr))
+        goto out;
+
+    psad6_print(&iph->saddr, ntohs(tcp->source),
+                &iph->daddr, ntohs(tcp->dest), flags);
+
+out:
+    return NF_ACCEPT;
+}
+#endif
+
+static struct nf_hook_ops g_smith_nf_psad[] = {
+        {
+                .hook = (void *)smith_nf_psad_v4_handler,
+                .pf =           NFPROTO_IPV4,
+                .hooknum =      NF_INET_PRE_ROUTING,
+                .priority =     NF_IP_PRI_FIRST,
+        },
+#if IS_ENABLED(CONFIG_IPV6)
+        {
+                .hook = (void *)smith_nf_psad_v6_handler,
+                .pf =           NFPROTO_IPV6,
+                .hooknum =      NF_INET_PRE_ROUTING,
+                .priority =     NF_IP_PRI_FIRST,
+        },
+#endif
+};
+
+static DEFINE_MUTEX(g_nf_psad_lock);
+static int g_nf_psad_switch = 0;
+static int g_nf_psad_status = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
+
+static int smith_nf_psad_reg(struct net *net)
+{
+    return nf_register_net_hooks(net, g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
+}
+
+static void smith_nf_psad_unreg(struct net *net)
+{
+    nf_unregister_net_hooks(net, g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
+}
+
+#else
+
+static atomic_t g_nf_hooks_regged = ATOMIC_INIT(0);
+
+static int smith_nf_psad_reg(struct net *net)
+{
+    int rc = 0;
+
+    /*
+     * only do register for the 1st time. We need control the callings of
+     * nf_register_hooks if we keep register_pernet_subsys for kernels < 4.3
+     */
+    if (1 == atomic_inc_return(&g_nf_hooks_regged))
+        rc = nf_register_hooks(g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
+
+    return rc;
+}
+
+static void smith_nf_psad_unreg(struct net *net)
+{
+    /* do cleanup for the last instance of net namespace */
+    if (0 == atomic_dec_return(&g_nf_hooks_regged))
+        nf_unregister_hooks(g_smith_nf_psad, ARRAY_SIZE(g_smith_nf_psad));
+}
+
+#endif /* >= 4.3.0 */
+
+static struct pernet_operations smith_psad_net_ops = {
+    .init = smith_nf_psad_reg,
+    .exit = smith_nf_psad_unreg,
+};
+
+static void smith_switch_psad(void)
+{
+    mutex_lock(&g_nf_psad_lock);
+    if (g_nf_psad_switch != g_nf_psad_status) {
+        if (g_nf_psad_switch) {
+            if (!register_pernet_subsys(&smith_psad_net_ops))
+                g_nf_psad_status = 1;
+            else
+                g_nf_psad_switch = 0;
+        } else {
+            unregister_pernet_subsys(&smith_psad_net_ops);
+            g_nf_psad_status = 0;
+        }
+        printk("psad_switch: %d psad_status: %d\n", g_nf_psad_switch, g_nf_psad_status);
+    }
+    mutex_unlock(&g_nf_psad_lock);
+}
+
+#if defined(module_param_cb)
+# define K_PARAM_CONST const
+#else
+# define K_PARAM_CONST
+#endif
+
+static int psad_set_params(const char *val, K_PARAM_CONST struct kernel_param *kp)
+{
+    if (0 == strcmp(kp->name, "psad_switch")) {
+        int rc = param_set_bool(val, kp);
+        if (!rc)
+            smith_switch_psad();
+        return rc;
+    }
+
+    if (0 == strcmp(kp->name, "psad_flags"))
+        return param_set_ulong(val, kp);
+
+    return 0;
+}
+
+static struct {
+    unsigned long flag;
+    char *name;
+} g_psad_tcp_flags[] = {
+    { TCP_FLAG_NUL, "NUL" },
+    { TCP_FLAG_FIN, "FIN" },
+    { TCP_FLAG_SYN, "SYN" },
+    { TCP_FLAG_RST, "RST" },
+    { TCP_FLAG_PSH, "PSH" },
+    { TCP_FLAG_ACK, "ACK" },
+    { TCP_FLAG_URG, "URG" },
+    {0}
+};
+
+static int psad_get_params(char *val, K_PARAM_CONST struct kernel_param *kp)
+{
+    int len, i;
+
+    if (0 == strcmp(kp->name, "psad_switch"))
+        return param_get_bool(val, kp);
+
+    if (0 != strcmp(kp->name, "psad_flags"))
+        return 0;
+
+    len = scnprintf(val, PAGE_SIZE, "0x%8.8lx:", g_psad_flags);
+    for (i = 0; g_psad_tcp_flags[i].flag; i++) {
+        int rc = scnprintf(val + len, PAGE_SIZE - len, " %c%s (%lx)",
+                    (g_psad_flags & g_psad_tcp_flags[i].flag) ? '+' : '-',
+                    g_psad_tcp_flags[i].name, g_psad_tcp_flags[i].flag);
+        len = len + rc;
+    }
+    return len + scnprintf(val + len, PAGE_SIZE - len, "\n");
+}
+
+#if defined(module_param_cb)
+const struct kernel_param_ops psad_params_ops = {
+    .set = psad_set_params,
+    .get = psad_get_params,
+};
+module_param_cb(psad_switch, &psad_params_ops, &g_nf_psad_switch, 0600);
+module_param_cb(psad_flags, &psad_params_ops, &g_psad_flags, 0600);
+#elif defined(module_param_call)
+module_param_call(psad_switch, psad_set_params, psad_get_params, &g_nf_psad_switch, 0600);
+module_param_call(psad_flags, psad_set_params, psad_get_params, &g_psad_flags, 0600);
+#else
+# warning "moudle_param_cb or module_param_call are not supported by target kernel"
+#endif
+MODULE_PARM_DESC(psad_switch, "Set to 1 to enable detection of port-scanning, 0 otherwise");
+MODULE_PARM_DESC(psad_flags, "psad scanning mask of tcp flags");
+
+/*
+ * file md5 hash computation
+ */
+
+#include <crypto/hash.h>
+
+typedef struct {
+    struct shash_desc shash;
+    char ctx[];
+} smith_shash_t;
+
+typedef struct {
+    smith_shash_t *md5;
+    struct crypto_shash *tfm;
+} smith_md5_t;
+
+static int smith_md5_create(smith_md5_t *md5)
+{
+    struct crypto_shash *tfm;
+    smith_shash_t *shash;
+    int len, rc;
+
+    if(!md5)
+        return -EINVAL;
+
+    tfm = crypto_alloc_shash("md5", 0, 0);
+    if (IS_ERR(tfm))
+        return PTR_ERR(tfm);
+
+    len = sizeof(*shash) + crypto_shash_descsize(tfm);
+    shash = kzalloc(len, GFP_KERNEL);
+    if (shash == NULL) {
+        crypto_free_shash(tfm);
+        return -ENOMEM;
+    }
+
+    shash->shash.tfm = tfm;
+    rc = crypto_shash_init(&shash->shash);
+    if (rc) {
+        kfree(shash);
+        crypto_free_shash(tfm);
+        return rc;
+    }
+
+    md5->tfm = tfm;
+    md5->md5 = shash;
+
+    return 0;
+}
+
+static int smith_md5_update(smith_md5_t *md5, char *buf, int len)
+{
+    if (md5 == NULL || md5->md5 == NULL || buf == NULL)
+        return -EINVAL;
+
+    return crypto_shash_update(&md5->md5->shash, buf, len);
+}
+
+static int smith_md5_final(smith_md5_t *md5, char *out)
+{
+    if (md5 == NULL || md5->md5 == NULL || out == NULL)
+        return -EINVAL;
+
+    return crypto_shash_final(&md5->md5->shash, out);
+}
+
+static void smith_md5_destroy(smith_md5_t *md5)
+{
+    if (IS_ERR_OR_NULL(md5))
+        return;
+
+    if (md5->md5)
+        kfree(md5->md5);
+    if (md5->tfm)
+        crypto_free_shash(md5->tfm);
+    md5->tfm = NULL;
+    md5->md5 = NULL;
+}
+
+static int smith_get_hash_file(struct file *file, image_hash_t *hash)
+{
+    char *buf = NULL;
+    smith_md5_t md5 = {0};
+    loff_t off = 0;
+    ssize_t rc = 0, len = 1048576;
+
+    if (hash == NULL || file == NULL)
+        return -EINVAL;
+
+    hash->size = i_size_read(file_inode(file));
+    if (!hash->size)
+        return -EINVAL;
+    if (len > hash->size)
+        len = hash->size;
+
+    memset(&md5, 0, sizeof(smith_md5_t));
+    rc = smith_md5_create(&md5);
+    if (rc) {
+        printk("failed to create md5 crypto, rc=%zd\n", rc);
+        return rc;
+    }
+
+    buf = vmalloc(len);
+    if (!buf) {
+        rc = -ENOMEM;
+        goto out;
+    }
+
+    do {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
+        rc = kernel_read(file, buf, len, &off);
+        if (rc <= 0)
+            break;
+#else
+        rc = kernel_read(file, off, buf, len);
+        if (rc <= 0)
+            break;
+        off += rc;
+#endif
+        rc = smith_md5_update(&md5, buf, rc);
+        if (rc) {
+            printk("md5 update failure: rc=%zd\n", rc);
+            goto out;
+        }
+    } while (off < 1048576 * 2 && off < hash->size);
+
+    rc = smith_md5_final(&md5, (char *)&hash->hash);
+    if (rc) {
+        printk("crypto_shash_final: rc=%zd\n", rc);
+        goto out;
+    }
+    hash->hlen = 16;
+
+out:
+    smith_md5_destroy(&md5);
+    if (buf)
+        vfree(buf);
+    return rc;
+}
+
+static void exe_block_notify(char *rule, char *file_path, char *args)
+{
+    char *pname = DEFAULT_RET_STR;
+    char *pname_buf = NULL;
+    char *pid_tree = NULL;
+    char *exe_path = file_path;
+    struct smith_tid *tid = NULL;
+
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        if (!exe_path)
+            exe_path = tid->st_img->si_path;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
+
+    exe_warn_md5_print(exe_path, rule, args, pname, pid_tree, NULL);
+
+    if (pname_buf)
+        smith_kfree(pname_buf);
+    if (tid)
+        smith_put_tid(tid);
+}
+
+static void md5_block_notify(image_hash_t *hash, char *file_path, char *args)
+{
+    char *pname = DEFAULT_RET_STR;
+    char *pname_buf = NULL;
+    char *pid_tree = NULL;
+    char *exe_path = file_path;
+    struct smith_tid *tid = NULL;
+    char rule[12];
+    char md5s[36] = {0};
+    int i;
+
+    for (i = 0; i < 16; i++)
+        sprintf(&md5s[i * 2], "%2.2x", hash->hash.v8[i]);
+    snprintf(rule, sizeof(rule), "EL%6.6s", hash->id);
+    tid = smith_lookup_tid(current);
+    if (tid) {
+        if (!exe_path)
+            exe_path = tid->st_img->si_path;
+        pid_tree = tid->st_pid_tree;
+    }
+
+    pname_buf = smith_kzalloc(PATH_MAX, GFP_ATOMIC);
+    pname = smith_d_path(&current->fs->pwd, pname_buf, PATH_MAX);
+
+    exe_warn_md5_print(exe_path, rule, args, pname, pid_tree, md5s);
+
+    if (pname_buf)
+        smith_kfree(pname_buf);
+    if (tid)
+        smith_put_tid(tid);
+}
+
+#if 0
+matt@devz1 /BUILD> grep -rn -A3 ^long\ get_user_pages_remote\( (find . -path \*/include/linux/mm.h)
+--
+linux-3.10.0-1160.el7/include/linux/mm.h:1396:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+linux-3.10.0-1160.el7/include/linux/mm.h-1397-			    unsigned long start, unsigned long nr_pages,
+linux-3.10.0-1160.el7/include/linux/mm.h-1398-			    int write, int force, struct page **pages,
+linux-3.10.0-1160.el7/include/linux/mm.h-1399-			    struct vm_area_struct **vmas);
+--
+linux-headers-4.13.0-41/include/linux/mm.h:1339:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+linux-headers-4.13.0-41/include/linux/mm.h-1340-			    unsigned long start, unsigned long nr_pages,
+linux-headers-4.13.0-41/include/linux/mm.h-1341-			    unsigned int gup_flags, struct page **pages,
+linux-headers-4.13.0-41/include/linux/mm.h-1342-			    struct vm_area_struct **vmas, int *locked);
+--
+4.15.0-1.el7.elrepo.x86_64/include/linux/mm.h:1372:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+4.15.0-1.el7.elrepo.x86_64/include/linux/mm.h-1373-			    unsigned long start, unsigned long nr_pages,
+4.15.0-1.el7.elrepo.x86_64/include/linux/mm.h-1374-			    unsigned int gup_flags, struct page **pages,
+4.15.0-1.el7.elrepo.x86_64/include/linux/mm.h-1375-			    struct vm_area_struct **vmas, int *locked);
+--
+4.18.0-553.51.1.el8_10.x86_64/include/linux/mm.h:1673:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+4.18.0-553.51.1.el8_10.x86_64/include/linux/mm.h-1674-                      unsigned long start, unsigned long nr_pages,
+4.18.0-553.51.1.el8_10.x86_64/include/linux/mm.h-1675-                      unsigned int gup_flags, struct page **pages,
+4.18.0-553.51.1.el8_10.x86_64/include/linux/mm.h-1676-                      struct vm_area_struct **vmas, int *locked);
+__
+./linux-5.4.8-rpi4/include/linux/mm.h:1532:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+./linux-5.4.8-rpi4/include/linux/mm.h-1533-			    unsigned long start, unsigned long nr_pages,
+./linux-5.4.8-rpi4/include/linux/mm.h-1534-			    unsigned int gup_flags, struct page **pages,
+./linux-5.4.8-rpi4/include/linux/mm.h-1535-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-image-bsk/include/linux/mm.h:1527:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+./linux-image-bsk/include/linux/mm.h-1528-			    unsigned long start, unsigned long nr_pages,
+./linux-image-bsk/include/linux/mm.h-1529-			    unsigned int gup_flags, struct page **pages,
+./linux-image-bsk/include/linux/mm.h-1530-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-5.4.210.bsk.6/include/linux/mm.h:1527:long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
+./linux-5.4.210.bsk.6/include/linux/mm.h-1528-			    unsigned long start, unsigned long nr_pages,
+./linux-5.4.210.bsk.6/include/linux/mm.h-1529-			    unsigned int gup_flags, struct page **pages,
+./linux-5.4.210.bsk.6/include/linux/mm.h-1530-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-5.12/include/linux/mm.h:1769:long get_user_pages_remote(struct mm_struct *mm,
+./linux-5.12/include/linux/mm.h-1770-			    unsigned long start, unsigned long nr_pages,
+./linux-5.12/include/linux/mm.h-1771-			    unsigned int gup_flags, struct page **pages,
+./linux-5.12/include/linux/mm.h-1772-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-5.13rc/include/linux/mm.h:1811:long get_user_pages_remote(struct mm_struct *mm,
+./linux-5.13rc/include/linux/mm.h-1812-			    unsigned long start, unsigned long nr_pages,
+./linux-5.13rc/include/linux/mm.h-1813-			    unsigned int gup_flags, struct page **pages,
+./linux-5.13rc/include/linux/mm.h-1814-			    struct vm_area_struct **vmas, int *locked);
+--
+5.14.0-373.el9.x86_64/include/linux/mm.h:1903:long get_user_pages_remote(struct mm_struct *mm,
+5.14.0-373.el9.x86_64/include/linux/mm.h-1904-			    unsigned long start, unsigned long nr_pages,
+5.14.0-373.el9.x86_64/include/linux/mm.h-1905-			    unsigned int gup_flags, struct page **pages,
+5.14.0-373.el9.x86_64/include/linux/mm.h-1906-			    struct vm_area_struct **vmas, int *locked);
+--
+5.14.0-580.el9.x86_64/include/linux/mm.h:2464:long get_user_pages_remote(struct mm_struct *mm,
+5.14.0-580.el9.x86_64/include/linux/mm.h-2465-			   unsigned long start, unsigned long nr_pages,
+5.14.0-580.el9.x86_64/include/linux/mm.h-2466-			   unsigned int gup_flags, struct page **pages,
+5.14.0-580.el9.x86_64/include/linux/mm.h-2467-			   int *locked);
+--
+./linux-5.18.9/include/linux/mm.h:1912:long get_user_pages_remote(struct mm_struct *mm,
+./linux-5.18.9/include/linux/mm.h-1913-			    unsigned long start, unsigned long nr_pages,
+./linux-5.18.9/include/linux/mm.h-1914-			    unsigned int gup_flags, struct page **pages,
+./linux-5.18.9/include/linux/mm.h-1915-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-5.14/include/linux/mm.h:1815:long get_user_pages_remote(struct mm_struct *mm,
+./linux-5.14/include/linux/mm.h-1816-			    unsigned long start, unsigned long nr_pages,
+./linux-5.14/include/linux/mm.h-1817-			    unsigned int gup_flags, struct page **pages,
+./linux-5.14/include/linux/mm.h-1818-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-6.1-objpool_v8/include/linux/mm.h:1964:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.1-objpool_v8/include/linux/mm.h-1965-			    unsigned long start, unsigned long nr_pages,
+./linux-6.1-objpool_v8/include/linux/mm.h-1966-			    unsigned int gup_flags, struct page **pages,
+./linux-6.1-objpool_v8/include/linux/mm.h-1967-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-6.3.8/include/linux/mm.h:2228:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.3.8/include/linux/mm.h-2229-			    unsigned long start, unsigned long nr_pages,
+./linux-6.3.8/include/linux/mm.h-2230-			    unsigned int gup_flags, struct page **pages,
+./linux-6.3.8/include/linux/mm.h-2231-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-6.4.3/include/linux/mm.h:2368:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.4.3/include/linux/mm.h-2369-			    unsigned long start, unsigned long nr_pages,
+./linux-6.4.3/include/linux/mm.h-2370-			    unsigned int gup_flags, struct page **pages,
+./linux-6.4.3/include/linux/mm.h-2371-			    struct vm_area_struct **vmas, int *locked);
+--
+./linux-6.5rc/include/linux/mm.h:2397:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.5rc/include/linux/mm.h-2398-			   unsigned long start, unsigned long nr_pages,
+./linux-6.5rc/include/linux/mm.h-2399-			   unsigned int gup_flags, struct page **pages,
+./linux-6.5rc/include/linux/mm.h-2400-			   int *locked);
+--
+./linux-6.6/include/linux/mm.h:2419:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.6/include/linux/mm.h-2420-			   unsigned long start, unsigned long nr_pages,
+./linux-6.6/include/linux/mm.h-2421-			   unsigned int gup_flags, struct page **pages,
+./linux-6.6/include/linux/mm.h-2422-			   int *locked);
+--
+./linux-6.7-rc5/include/linux/mm.h:2428:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.7-rc5/include/linux/mm.h-2429-			   unsigned long start, unsigned long nr_pages,
+./linux-6.7-rc5/include/linux/mm.h-2430-			   unsigned int gup_flags, struct page **pages,
+./linux-6.7-rc5/include/linux/mm.h-2431-			   int *locked);
+--
+./linux-6.8.1/include/linux/mm.h:2440:long get_user_pages_remote(struct mm_struct *mm,
+./linux-6.8.1/include/linux/mm.h-2441-			   unsigned long start, unsigned long nr_pages,
+./linux-6.8.1/include/linux/mm.h-2442-			   unsigned int gup_flags, struct page **pages,
+./linux-6.8.1/include/linux/mm.h-2443-			   int *locked);
+
+#endif
+
+static struct page * smith_get_arg_page(struct linux_binprm *bprm, unsigned long pos)
+{
+    struct mm_struct *mm = bprm->mm;
+    struct page *page = NULL;
+    int ret = 0;
+
+    if (smith_get_arg_page_krnl)
+        return smith_get_arg_page_krnl(bprm, pos, 0);
+
+    /* remap args page, should be already mapped by copy_strings */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0)
+# if defined(MM_MMAP_FLAGS_LOCK)
+    mmap_read_lock(mm);
+# endif
+    ret = get_user_pages_remote(
+# if defined(MM_GUPR_FLAGS_TASK)
+        current,
+# endif
+        mm, pos, 1, FOLL_FORCE, &page
+# if defined(MM_GUPR_FLAGS_VMAS)
+        , NULL
+# endif
+# if defined(MM_GUPR_FLAGS_LOCK)
+        , NULL
+# endif
+    );
+# if defined(MM_MMAP_FLAGS_LOCK)
+    mmap_read_unlock(mm);
+# endif
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0)
+    ret = get_user_pages_remote(current, mm, pos, 1, 0, 1, &page, NULL);
+#elif defined(MM_GUP_FLAGS_SUPPORT)
+    ret = get_user_pages(current, mm, pos, 1, FOLL_FORCE, &page, NULL);
+#else
+    ret = get_user_pages(current, mm, pos, 1, 0, 1, &page, NULL);
+#endif
+
+    return page;
+}
+
+static char *smith_query_args(struct linux_binprm *bprm)
+{
+    struct page *page = NULL;
+    char *kaddr, *cmd = NULL;
+    unsigned long pos = bprm->p;
+
+    page = smith_get_arg_page(bprm, pos);
+    if (!page)
+        return cmd;
+
+    kaddr = kmap(page);
+    if (kaddr) {
+        int offset = (int)(pos & (PAGE_SIZE - 1)), i, nargs = 0;
+        for (i = offset + 1; i < PAGE_SIZE; i++) {
+            if (kaddr[i] == 0) {
+                nargs++;
+                if (nargs >= bprm->argc)
+                    break;
+            }
+        }
+        if (i > offset) {
+            cmd = smith_kzalloc(i - offset + 1, GFP_KERNEL);
+            if (cmd) {
+                memcpy(cmd, kaddr + offset, i - offset);
+                i -= offset;
+                while (--i >= 0) {
+                    if (!cmd[i])
+                        cmd[i] = ' ';
+                }
+            }
+        }
+        kunmap(page);
+    }
+    put_page(page);
+    return cmd;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 8, 0)
+static int smith_exec_load(struct linux_binprm *bprm)
+#else
+static int smith_exec_load(struct linux_binprm *bprm, struct pt_regs *regs)
+#endif
+{
+    char *file_path = (char *)bprm->filename;
+    char *buffer = NULL, *args = NULL;
+    char *stdin_buf = NULL, *stdout_buf = NULL;
+    struct smith_img *img = NULL;
+    struct file *file;
+    struct exe_item ei[4] = {{0}, {0}, {0}, {0}};
+    image_hash_t md5 = {0};
+    char id[12] = {0};
+    int rc = -ENOEXEC; /* continue to next bprm checking */
+
+    /* always do md5 hash computing as required */
+    if (bprm->file) {
+        img = smith_find_file_img(bprm->file);
+        if (img && !img->si_node.flag_usr1) {
+            if (!smith_get_hash_file(bprm->file, &md5) &&
+                img->si_size == md5.size) {
+                memcpy(&img->si_md5, &md5, sizeof(md5));
+                img->si_node.flag_usr1 = 1;
+            }
+        }
+    }
+
+    /* both path and hash rules are empty, so skip */
+    if (!g_flt_ops.rule_check(NULL, 0, NULL) &&
+        !g_flt_ops.hash_check(NULL)) {
+        goto errorout; /* -ENOEXEC */
+    }
+
+    /*
+     * path rules matching
+     */
+
+    /* query stdin */
+    file = smith_fget_raw(0);
+    if (file) {
+        stdin_buf = smith_kzalloc(256, GFP_ATOMIC);
+        ei[2].item = smith_d_path(&(file->f_path), stdin_buf, 256);
+        if (ei[2].item)
+            ei[2].size = strlen(ei[2].item);
+        smith_fput(file);
+    }
+
+    /* query stdout */
+    file = smith_fget_raw(1);
+    if (file) {
+        stdout_buf = smith_kzalloc(256, GFP_ATOMIC);
+        ei[3].item = smith_d_path(&(file->f_path), stdout_buf, 256);
+        if (ei[3].item)
+            ei[3].size = strlen(ei[3].item);
+        smith_fput(file);
+    }
+
+    /* query exe_path */
+    if (!file_path || file_path[0] != '/') {
+        buffer = smith_kzalloc(PATH_MAX, GFP_KERNEL);
+        if (!buffer)
+            goto hash_check;
+        if (bprm->file)
+            file_path = smith_d_path(&bprm->file->f_path,
+                                      buffer, PATH_MAX);
+        if (!file_path || file_path[0] != '/') {
+            file_path = smith_get_pwd_path(buffer, PATH_MAX);
+            if (file_path[0] == '/' && bprm->filename) {
+                int i = strlen(file_path);
+                while (i > 0 && file_path[i - 1] == '/')
+                    i--;
+                if (i + strlen(bprm->filename) < PATH_MAX)
+                    strcpy(&file_path[i], bprm->filename);
+            }
+        }
+    }
+    ei[0].item = file_path;
+    if (ei[0].item)
+        ei[0].size = strlen(ei[0].item);
+
+    /* query cmdline with arguments */
+    args = smith_query_args(bprm);
+    ei[1].item = args;
+    if (ei[1].item)
+        ei[1].size = strlen(ei[1].item);
+
+    /* checking exe/cmd rules */
+    if (g_flt_ops.rule_check(ei, 4, id)) {
+        exe_block_notify(id, file_path, args);
+        rc = -EACCES;
+        goto errorout;
+    }
+
+hash_check:
+
+    /* there are no hash rules, so skip md5 checking */
+    if (!g_flt_ops.hash_check(NULL))
+        goto errorout;
+
+    /*
+     * MD5 hash rules matching
+     */
+
+    if (!bprm->file)
+        goto errorout;
+
+    /* check whether img is already cached */
+    if (!img)
+        img = smith_find_file_img(bprm->file);
+    if (img && img->si_node.flag_usr1) {
+        memcpy(&md5, &img->si_md5, sizeof(md5));
+    } else {
+        if (smith_get_hash_file(bprm->file, &md5))
+            goto errorout;
+        if (img && img->si_size == md5.size) {
+            memcpy(&img->si_md5, &md5, sizeof(md5));
+            img->si_node.flag_usr1 = 1;
+        }
+    }
+
+    /* compute md5 of specified file */
+    if (md5.hlen == 16) {
+        /* checking md5 rules */
+        if (g_flt_ops.hash_check(&md5)) {
+            md5_block_notify(&md5, file_path, args);
+            rc = -EACCES;
+            goto errorout;
+        }
+    }
+
+errorout:
+    if (buffer)
+        smith_kfree(buffer);
+    if (args)
+        smith_kfree(args);
+    if (stdin_buf)
+        smith_kfree(stdin_buf);
+    if (stdout_buf)
+        smith_kfree(stdout_buf);
+    if (img)
+        smith_put_img(img);
+    return rc;
+}
+
+static struct linux_binfmt g_smith_exec_load = {
+    /* search_binary_handler will try grab module if .module is set */
+    .module      = THIS_MODULE,
+    .load_binary = smith_exec_load,
+};
+static atomic_t g_binfmt_regged = ATOMIC_INIT(0);
+
+int smith_register_exec_load(void)
+{
+    int rc = atomic_cmpxchg(&g_binfmt_regged, 0, 1);
+
+    if (rc == 0)
+        __register_binfmt(&g_smith_exec_load, 1);
+
+    return (rc <= 0 ? rc : -EALREADY);
+}
+
+int smith_unregister_exec_load(void)
+{
+    int rc = atomic_cmpxchg(&g_binfmt_regged, 1, 0);
+
+    if (rc)
+        unregister_binfmt(&g_smith_exec_load);
+
+    return (rc ? 0 : -EALREADY);
+}
+
+/*
+ * System resouces used by HIDS/Elkeid LKM
+ */
+static char g_drv_stats[64] = "";
+
+#if !SMITH_FILE_CREATION_TRACK
+static atomic_t g_atomic_zero;
+static uint32_t g_nobjs_zero;
+#endif
+
+static struct smith_obj_stat {
+    const char *name;
+    atomic_t *active;
+    uint32_t *allocs;
+} g_stat_objs[] = {
+    {"tids", &g_hlist_tid.count, &g_hlist_tid.pool.nr_objs},
+    {"imgs", &g_rb_img.count, &g_rb_img.pool.nr_objs},
+    {"dput", &g_delayed_put_active, &g_delayed_put_root.nr_objs},
+#if SMITH_FILE_CREATION_TRACK
+    {"ents", &g_rb_ent.count, &g_rb_ent.pool.nr_objs},
+#else
+    {"ents", &g_atomic_zero, &g_nobjs_zero},
+#endif
+    {"conns", &g_rb_conn.count, &g_rb_conn.pool.nr_objs},
+    {NULL, },
+};
+
+static int drvstats_get_params(char *val, K_PARAM_CONST struct kernel_param *kp)
+{
+    int len = 0, i;
+
+    if (0 == strcmp(kp->name, "worker_stats")) {
+        len = scnprintf(val, PAGE_SIZE, "%ld",
+              IS_ERR_OR_NULL(g_delayed_put_thread) ?
+              -1L : g_delayed_put_thread->pid);
+    } else if (0 == strcmp(kp->name, "mem_stats")) {
+        for (i = 0; g_stat_objs[i].name; i++) {
+            int l = scnprintf(val + len, PAGE_SIZE - len,
+                        i == 0 ? "%d %u" : " %d %u",
+                        atomic_read(g_stat_objs[i].active),
+                        *g_stat_objs[i].allocs);
+            len = len + l;
+        }
+    }
+    if (len)
+        len += scnprintf(val + len, PAGE_SIZE - len, "\n");
+
+    return len;
+}
+
+static int drvstats_set_params(const char *val, K_PARAM_CONST struct kernel_param *kp)
+{
+    if (0 == strcmp(kp->name, "mem_stats")) {
+        int i, l = strnlen(val, 4095);
+        for (i = 0; i < l; i++) {
+            if (val[i] == 'I') {
+                smith_enum_img_lru();
+            } else if (val[i] == 'i') {
+                smith_enum_img();
+            } else if (val[i] == 'L' || val[i] == 'l') {
+                smith_enum_img_lru();
+            } else if (val[i] == 'E' || val[i] == 'e') {
+                smith_enum_img_lru();
+                smith_enum_img();
+                smith_enum_conn_lru();
+                smith_enum_conn();
+            } else if (val[i] == 'T' || val[i] == 't') {
+                smith_enum_tid();
+            } else if (val[i] == 'C') {
+                smith_enum_conn_lru();
+            } else if (val[i] == 'c') {
+                smith_enum_conn();
+            } else if (val[i] != ' ' && val[i] != 0x0a) {
+                return -EINVAL;
+            }
+        }
+        return 0;
+    }
+    return -EACCES;
+}
+
+#if defined(module_param_cb)
+const struct kernel_param_ops drvstats_params_ops = {
+    .set = drvstats_set_params,
+    .get = drvstats_get_params,
+};
+module_param_cb(worker_stats, &drvstats_params_ops, &g_drv_stats, 0400);
+module_param_cb(mem_stats, &drvstats_params_ops, &g_drv_stats, 0600);
+#elif defined(module_param_call)
+module_param_call(worker_stats, NULL, drvstats_get_params, &g_drv_stats, 0400);
+module_param_call(mem_stats, drvstats_set_params, drvstats_get_params, &g_drv_stats, 0600);
+#else
+# warning "moudle_param_cb or module_param_call are not supported by target kernel"
+#endif
+MODULE_PARM_DESC(worker_stats, "kernel worker threads for elkeid");
+MODULE_PARM_DESC(mem_stats, "memory usage of core objects of elkeid");
 
 #define SMITH_SRCID(name)                           \
     #name;                                          \
@@ -5022,77 +7112,128 @@ static void __init install_kprobe(void)
     module_param(sid_##name, charp, S_IRUSR|S_IRGRP|S_IROTH)
 
 /* latest commit id */
-static char *smith_srcid = SMITH_SRCID(ff8c8c100f9cd9d0aa1e0bb96031f45ef17dccf6_17024);
+static char *smith_srcid = SMITH_SRCID(0d9f9df4fe191ecd3d2ab76e49d78503a7517a96);
 
 static int __init kprobe_hook_init(void)
 {
     int ret;
 
+    /* enable sandbox mode if necessary */
+    if (SANDBOX == 1) {
+        DNS_HOOK = 1;
+        USERMODEHELPER_HOOK = 1;
+        //MPROTECT_HOOK = 1;
+        ACCEPT_HOOK = 1;
+        OPEN_HOOK = 1;
+        MPROTECT_HOOK = 1;
+        //NANOSLEEP_HOOK = 1;
+        KILL_HOOK = 1;
+        RM_HOOK = 1;
+        EXIT_HOOK = 1;
+        WRITE_HOOK = 1;
+
+        PID_TREE_LIMIT = 100;
+        PID_TREE_LIMIT_LOW = 100;
+        EXECVE_GET_SOCK_PID_LIMIT = 100;
+        EXECVE_GET_SOCK_FD_LIMIT = 100;
+
+        FAKE_SLEEP = 1;
+        FAKE_RM = 1;
+    }
+
+    /* TCPCONN_HOOK depends on CONNECT_HOOK */
+    if (!CONNECT_HOOK && TCPCONN_HOOK)
+        TCPCONN_HOOK = 0;
+
+    g_loaded_jiffies = smith_get_jiffies();
+
 #if defined(MODULE)
     printk(KERN_INFO "[ELKEID] kmod: %s (%s / %s) loaded\n",
            THIS_MODULE->name, THIS_MODULE->version, THIS_MODULE->srcversion);
+#else
+    printk(KERN_INFO "[ELKEID] intree (" SMITH_VERSION ") loaded.\n");
 #endif
     printk(KERN_INFO "[ELKEID] srcid: %s\n", smith_srcid);
 
-    ret = kernel_symbols_init();
+    ret = kernel_init_symbols();
     if (ret)
         return ret;
 
-    /* prepare delayed-put thread for async put_files_struct */
+    smith_init_systemd_ns();
+
+    /*  prepare delayed-put thread for async put_files_struct */
     ret = smith_start_delayed_put();
     if (ret)
         return ret;
 
-    ret = filter_init();
+    /* need ROOT_MNT_NS inited by smith_init_systemd_ns */
+    ret = smith_init_cache();
     if (ret) {
+        smith_stop_delayed_put();
+        return ret;
+    }
+
+    /* initialize tracepoints */
+    ret = smith_init_trace();
+    if (ret) {
+        smith_fini_cache();
         smith_stop_delayed_put();
         return ret;
     }
 
     printk(KERN_INFO "[ELKEID] Filter Init Success \n");
 
-#if (EXIT_PROTECT == 1)
+    /* install kprobe & kretprobe hookpoints */
+    smith_init_kprobe();
+
+    /* psad skipped, to be dynamically turned on */
+
+    /* init self-protection */
+    smith_protect_init();
+
+    /* register binfmt callback for image checking */
+    smith_register_exec_load();
+
+    printk(KERN_INFO "[ELKEID] SANDBOX: %d\n", SANDBOX);
+    printk(KERN_INFO
+    "[ELKEID] register_kprobe success: connect_hook: %d, load_module_hook:"
+    " %d, execve_hook: %d, call_usermodehelper_exec_hook: %d, bind_hook: %d, create_file_hook: %d, ptrace_hook: %d, update_cred_hook:"
+    " %d, dns_hook: %d, accept_hook:%d, mprotect_hook: %d, chmod_hook: %d, mount_hook: %d, link_hook: %d, memfd_create: %d, rename_hook: %d,"
+    "setsid_hook:%d, prctl_hook:%d, open_hook:%d, udev_notifier:%d, nanosleep_hook:%d, kill_hook: %d, rm_hook: %d, "
+    " exit_hook: %d, write_hook: %d, EXIT_PROTECT: %d\n",
+            CONNECT_HOOK, MODULE_LOAD_HOOK, EXECVE_HOOK, USERMODEHELPER_HOOK, BIND_HOOK,
+            CREATE_FILE_HOOK, PTRACE_HOOK, UPDATE_CRED_HOOK, DNS_HOOK, ACCEPT_HOOK, MPROTECT_HOOK,
+            CHMOD_HOOK, MOUNT_HOOK, LINK_HOOK, MEMFD_CREATE_HOOK, RENAME_HOOK, SETSID_HOOK,
+            PRCTL_HOOK, OPEN_HOOK, UDEV_HOOK, NANOSLEEP_HOOK, KILL_HOOK, RM_HOOK, EXIT_HOOK, WRITE_HOOK,
+            EXIT_PROTECT);
+
+#if (EXIT_PROTECT == 1) && defined(MODULE)
     exit_protect_action();
 #endif
 
-    __init_root_pid_ns_inum();
-
-    /* register tracepoints for dns query */
-    ret = smith_sysret_init();
-    if (ret) {
-        filter_cleanup();
-        smith_stop_delayed_put();
-        return ret;
-    }
-
-    /* install kprobe/kretprobe hookproints */
-    install_kprobe();
-
-    printk( KERN_INFO "[ELKEID] SANDBOX: %d\n", SANDBOX);
-    printk( KERN_INFO "[ELKEID] register_kprobe success: connect_hook: %d, load_module_hook:  %d, execve_hook: %d, "
-            "call_usermodehekoer_hook: %d, bind_hook: %d, create_file_hook: %d, ptrace_hook: %d, update_cred_hook: %d, "
-            "dns_hook: %d, accept_hook:%d, mprotect_hook: %d, mount_hook: %d, link_hook: %d, memfd_create: %d, "
-            "rename_hook: %d, setsid_hook:%d, prctl_hook:%d, open_hook:%d, udev_hook:%d, nanosleep_hook:%d, kill_hook: %d, "
-            "rm_hook: %d, exit_hook: %d, write_hook: %d, EXIT_PROTECT: %d\n",
-            CONNECT_HOOK, MODULE_LOAD_HOOK, EXECVE_HOOK, USERMODEHELPER_HOOK, BIND_HOOK, CREATE_FILE_HOOK, PTRACE_HOOK,
-            UPDATE_CRED_HOOK, DNS_HOOK, ACCEPT_HOOK, MPROTECT_HOOK, MOUNT_HOOK, LINK_HOOK, MEMFD_CREATE_HOOK, RENAME_HOOK,
-            SETSID_HOOK, PRCTL_HOOK, OPEN_HOOK, UDEV_HOOK, NANOSLEEP_HOOK, KILL_HOOK, RM_HOOK, EXIT_HOOK, WRITE_HOOK,
-            EXIT_PROTECT);
     return 0;
 }
 
 static void kprobe_hook_exit(void)
 {
+    /* unregister binfmt callback first */
+    smith_unregister_exec_load();
+
     /* clean nf_hooks of psad if hooked */
     mutex_lock(&g_nf_psad_lock);
     if (g_nf_psad_status)
         unregister_pernet_subsys(&smith_psad_net_ops);
     mutex_unlock(&g_nf_psad_lock);
 
-    /* cleaning up kprobe hook points */
-    uninstall_kprobe();
-    smith_sysret_fini();
-    filter_cleanup();
+    /* close self-protection if it's enabled */
+    smith_protect_destroy();
+
+    /* cleaning up hook points: kprobe * trace */
+    smith_fini_kprobe();
+    smith_fini_trace();
+
+    /* cleaning up tid & img cache */
+    smith_fini_cache();
     smith_stop_delayed_put();
 
     printk(KERN_INFO "[ELKEID] uninstall_kprobe success\n");

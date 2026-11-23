@@ -8,16 +8,19 @@
  *  Author: Nick Bulischeck <nbulisc@clemson.edu>
  */
 
+#include "../include/kprobe.h"
+
 #define ANTI_ROOTKIT_CHECK 1
 #if ANTI_ROOTKIT_CHECK
 
-#include <linux/kthread.h>
 #include "../include/util.h"
-#include "../include/trace.h"
-#include "../include/kprobe.h"
+#include <linux/kthread.h>
 #include "../include/anti_rootkit.h"
+#include "../include/trace.h"
 
-#define CREATE_PRINT_EVENT
+#undef SD_XFER_DEFINE
+#define SD_XFER_DEFINE(n, p, x) SD_XFER_DEFINE_N(n, p, x)
+
 #include "../include/anti_rootkit_print.h"
 
 #define DEFERRED_CHECK_TIMEOUT (15 * 60)
@@ -51,9 +54,9 @@ static struct module *(*get_module_from_addr)(unsigned long addr);
     ((uintptr_t)x < ((uintptr_t)y+(uintptr_t)z)) \
 )
 
-static const char *find_hidden_module(unsigned long addr)
+static char *find_hidden_module(unsigned long addr)
 {
-    const char *mod_name = NULL;
+    char *mod_name = NULL;
     struct kobject *cur;
     struct module_kobject *kobj;
 
@@ -107,7 +110,7 @@ static void module_list_unlock(void)
 
 static void analyze_syscalls(void)
 {
-    int i;
+	int i;
 	unsigned long addr;
 	struct module *mod;
 
@@ -115,7 +118,7 @@ static void analyze_syscalls(void)
 		return;
 
 	for (i = 0; i < NR_syscalls; i++) {
-		const char *mod_name = "-1";
+		char *mod_name = NULL;
 		addr = sct[i];
 	
 		if (!ckt(addr)) {
@@ -124,12 +127,11 @@ static void analyze_syscalls(void)
 			if (mod) {
 				mod_name = mod->name;
 			} else {
-				const char* name = find_hidden_module(addr);
+				char* name = find_hidden_module(addr);
 				if (IS_ERR_OR_NULL(name)) {
 				    module_list_unlock();
 				    continue;
 				}
-
 				mod_name = name;
 			}
 			
@@ -151,7 +153,7 @@ static void analyze_interrupts(void)
 		return;
 
 	for (i = 0; i < IDT_ENTRIES; i++) {
-		const char *mod_name = "-1"; 
+		char *mod_name = NULL;
 
 		addr = get_isr_addr(&idt[i]);
 		if (addr && !ckt(addr)) {
@@ -161,12 +163,11 @@ static void analyze_interrupts(void)
 			if (mod) {
 				mod_name = mod->name;
 			} else {
-				const char *name = find_hidden_module(addr);
+				char *name = find_hidden_module(addr);
 				if (IS_ERR_OR_NULL(name)) {
 				    module_list_unlock();
 				    continue;
 				}
-
 				mod_name = name;
 			}
 
@@ -206,7 +207,7 @@ static void analyze_fops(void)
 {
     struct module *mod = NULL;
     unsigned long addr;
-	const char *mod_name;
+	char *mod_name;
 	struct file *fp;
 
 	fp = filp_open("/proc", O_RDONLY, S_IRUSR);
@@ -284,7 +285,6 @@ static int __init anti_rootkit_start(void)
     return rc;
 }
 
-
 static int __init anti_rootkit_init(void)
 {
     struct kset **kset;
@@ -316,7 +316,7 @@ static void anti_rootkit_exit(void)
     }
 }
 
-#else
+#else /* !ANTI_ROOTKIT_CHECK */
 
 static int __init anti_rootkit_init(void)
 {
@@ -328,6 +328,6 @@ static void anti_rootkit_exit(void)
     return;
 }
 
-#endif
+#endif /* ANTI_ROOTKIT_CHECK */
 
 KPROBE_INITCALL(anti_rootkit, anti_rootkit_init, anti_rootkit_exit);

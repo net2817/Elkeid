@@ -1,13 +1,7 @@
-MODULE_NAME		:= hids_driver
-KERNEL_HEAD		:= $(if $(wildcard $(srctree)/include/.),_-_,$(if $(KVERSION),$(KVERSION),$(shell uname -r)))
-
-$(MODULE_NAME)-objs	:= src/init.o src/trace.o src/trace_buffer.o src/smith_hook.o \
-                           src/anti_rootkit.o src/filter.o src/util.o src/memcache.o
-
-ifneq ($(KERNELRELEASE),)
+MODULE_NAME		:= elkeid
+KERNEL_HEAD		:= $(if $(KVERSION),$(KVERSION),$(shell uname -r))
 
 MODULE_DIR		:= $(KBUILD_EXTMOD)
-obj-m			+= $(MODULE_NAME).o
 ccflags-y		+= -I$(MODULE_DIR)/include -I$(MODULE_DIR)
 
 K_I_PATH		:= .
@@ -15,6 +9,9 @@ ifneq ($(wildcard $(srctree)/include/.),)
 K_I_PATH                += $(srctree)/include
 endif
 
+ifneq ($(wildcard /usr/src/$(KERNEL_HEAD)/include/.),)
+K_I_PATH		+= /usr/src/$(KERNEL_HEAD)/include
+endif
 ifneq ($(wildcard /usr/src/kernels/$(KERNEL_HEAD)/include/.),)
 K_I_PATH		+= /usr/src/kernels/$(KERNEL_HEAD)/include
 endif
@@ -66,29 +63,6 @@ ifneq ($(UACCESS_SUPPORT),)
 ccflags-y += -D UACCESS_TYPE_SUPPORT
 endif
 
-TRACE_EVENTS_HEADERS	:= $(shell find -L $(K_I_PATH) -path \*/linux/trace_events.h)
-ifneq ($(TRACE_EVENTS_HEADERS),)
-ccflags-y += -D SMITH_TRACE_EVENTS
-endif
-
-TRACE_SEQ_FILES := $(shell find -L $(K_I_PATH) -path \*/linux/trace_seq.h) /dev/null
-TRACE_SEQ_SEQ := $(shell sh -c "grep -s 'struct trace_seq {' -A5 $(TRACE_SEQ_FILES) | grep 'seq;'")
-ifneq ($(TRACE_SEQ_SEQ),)
-ccflags-y += -D SMITH_TRACE_SEQ
-endif
-TRACE_SEQ_READPOS := $(shell sh -c "grep -s 'struct trace_seq {' -A5 $(TRACE_SEQ_FILES) | grep 'readpos;'")
-ifneq ($(TRACE_SEQ_READPOS),)
-ccflags-y += -D SMITH_TRACE_READPOS
-endif
-TRACE_SEQ_FULL := $(shell sh -c "grep -s 'struct trace_seq {' -A5 $(TRACE_SEQ_FILES) | grep 'full;'")
-ifneq ($(TRACE_SEQ_FULL),)
-ccflags-y += -D SMITH_TRACE_FULL
-endif
-TRACE_SEQ_LEN := $(shell sh -c "grep -s 'struct trace_seq {' -A5 $(TRACE_SEQ_FILES) | grep 'len;'")
-ifneq ($(TRACE_SEQ_LEN),)
-ccflags-y += -D SMITH_TRACE_LEN
-endif
-
 FS_H_FILES := $(shell find -L $(K_I_PATH) -path "*/linux/fs.h") /dev/null
 FS_OP_ITERATE := $(shell sh -c "grep -s \(\*iterate\) $(FS_H_FILES)")
 FS_OP_ITERATE_SHARED := $(shell sh -c "grep -s \(\*iterate_shared\) $(FS_H_FILES)")
@@ -104,16 +78,6 @@ ccflags-y += -D SMITH_FS_FILE_REF
 endif
 
 PROCFS_H_FILES := $(shell find -L $(K_I_PATH) -path "*/linux/proc_fs.h") /dev/null
-PROCFS_PDE_DATA := $(shell sh -c "grep -s PDE_DATA $(PROCFS_H_FILES)")
-ifneq ($(PROCFS_PDE_DATA),)
-ccflags-y += -D SMITH_PROCFS_PDE_DATA
-else
-PROCFS_pde_data := $(shell sh -c "grep -s pde_data $(PROCFS_H_FILES)")
-ifneq ($(PROCFS_pde_data),)
-ccflags-y += -D SMITH_PROCFS_pde_data
-endif
-endif
-
 PROCNS_H_FILES := $(shell find -L $(K_I_PATH) -path "*/linux/proc_ns.h") /dev/null
 MNTNS_OPS_PROCFS := $(shell sh -c "grep -s mntns_operations $(PROCFS_H_FILES)")
 MNTNS_OPS_PROCNS := $(shell sh -c "grep -s mntns_operations $(PROCNS_H_FILES)")
@@ -136,10 +100,51 @@ ccflags-y += -D SMITH_HAVE_FCHECK_FILES
 endif
 
 USER_MSGHDR_FILES := $(shell find -L $(K_I_PATH) -path \*/linux/socket.h) /dev/null
-USER_MSGHDR_STRUT := $(shell sh -c "grep -sE struct[[:space:]]\+user_msghdr[[:space:]]\+\{ $(USER_MSGHDR_FILES)")
+USER_MSGHDR_STRUT := $(shell sh -c "grep -sE struct[[:space:]]\+user_msghdr[[:space:]]\+[\{\}] $(USER_MSGHDR_FILES)")
 ifeq ($(USER_MSGHDR_STRUT),)
 ccflags-y += -D USER_MSGHDR_SUPPORT
 endif
+
+MM_H_FILES := $(shell find -L $(K_I_PATH) -path \*/linux/mm.h) /dev/null
+MM_GUP_STRUT := $(shell sh -c "grep -sE -A2 long[[:space:]]\+get_user_pages[\(\)] $(MM_H_FILES) | grep gup_flags")
+ifneq ($(MM_GUP_STRUT),)
+ccflags-y += -D MM_GUP_FLAGS_SUPPORT
+endif
+MM_GUPR_TASK := $(shell sh -c "grep -sE -A3 long[[:space:]]\+get_user_pages_remote[\(\)] $(MM_H_FILES) | grep task_struct")
+ifneq ($(MM_GUPR_TASK),)
+ccflags-y += -D MM_GUPR_FLAGS_TASK
+endif
+MM_GUPR_VMAS := $(shell sh -c "grep -sE -A3 long[[:space:]]\+get_user_pages_remote[\(\)] $(MM_H_FILES) | grep vm_area_struct")
+ifneq ($(MM_GUPR_VMAS),)
+ccflags-y += -D MM_GUPR_FLAGS_VMAS
+endif
+MM_GUPR_LOCK := $(shell sh -c "grep -sE -A3 long[[:space:]]\+get_user_pages_remote[\(\)] $(MM_H_FILES) | grep locked")
+ifneq ($(MM_GUPR_LOCK),)
+ccflags-y += -D MM_GUPR_FLAGS_LOCK
+endif
+MMAP_LOCK_FILES := $(shell find -L $(K_I_PATH) -path \*/linux/mmap_lock.h) /dev/null
+MM_MMAP_LOCK := $(shell sh -c "grep -sE void[[:space:]]\+mmap_read_lock[\(\)] $(MM_H_FILES) $(MMAP_LOCK_FILES) | grep mmap_read_lock")
+ifneq ($(MM_MMAP_LOCK),)
+ccflags-y += -D MM_MMAP_FLAGS_LOCK
+endif
+
+ifneq ($(CONFIG_ELKEID),)
+
+#
+# sources for intree building
+#
+
+obj-$(CONFIG_ELKEID) += elkeid.o
+elkeid-$(CONFIG_ELKEID) := src/init.o src/trace.o src/trace_buffer.o src/smith_hook.o src/anti_rootkit.o src/protector.o src/filter.o src/util.o src/memcache.o
+
+else ifneq ($(KERNELRELEASE),)
+
+obj-m += $(MODULE_NAME).o
+$(MODULE_NAME)-objs := src/init.o src/trace.o src/trace_buffer.o src/smith_hook.o src/anti_rootkit.o src/protector.o src/filter.o src/util.o src/memcache.o
+
+
+MODULE_DIR		:= $(KBUILD_EXTMOD)
+ccflags-y		+= -I$(MODULE_DIR)/include -I$(MODULE_DIR) -I$(MODULE_DIR)/..
 
 else
 
@@ -159,21 +164,14 @@ all:
 	@echo "| building HIDS kernel module       |"
 	@echo "|-----------------------------------|"
 	$(MAKE) -C $(KERNEL_DIR) M=$(MODULE_DIR) modules
-ifneq ($(BATCH), true)
-	$(MAKE) -C test
-endif
 
 clean:
 	$(MAKE) -C $(KERNEL_DIR) M=$(MODULE_DIR) clean
-	$(MAKE) -C test clean
 
 insmod:
 	sudo insmod $(MODULE_NAME).ko
 
 rmmod:
 	sudo rmmod $(MODULE_NAME)
-
-test:
-	$(MAKE) -C test
 
 endif
