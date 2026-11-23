@@ -27,6 +27,7 @@ ttl_cache = "0.5"
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0" }
 plugins = { path = "../lib/rust" }
+ringslot = { path = "../../driver/rust" }
 parking_lot = "0.11"
 walkdir = "2.3"
 governor = "0.3.2"
