@@ -46,10 +46,10 @@ Hub 的“告警白名单”用于告警过滤。驱动 exe/argv allowlist 用�
 | 来源 | 已确认内容 | 状态与处理 |
 |---|---|---|
 | `v1.8-rc` | eBPF 保存可信 executable path/argv 哈希；命中后在部分 syscall/exec 数据路径提前返回 | 采集降噪，不是执行允许策略；旧驱动线，重复/移植前需核验 |
-| `2.2/scanner`、`2.2.1/scanner`、`2.2.2/scanner` | fanotify 目录/递归配置、静态 exe/argv 过滤和文件创建/修改/删除/移动事件 | 比当前 Scanner 配置更细；仍是旧 Scanner 版本线，需要移植并验证，不是完整 FIM |
+| `2.2/scanner`、`2.2.1/scanner`、`2.2.2/scanner` | `2.2.2/scanner` 有 fanotify 文件事件采集、`FanotifyEvent` 数据类型 6012（路径/哈希/事件掩码及进程信息），并提供监控路径和 exe/argv 过滤配置 | 属于旧 Scanner 线；当前主线有 fanotify 扫描，但没有该独立事件记录通路。移植需适配当前配置/任务模型，并确认后端消费 6012；仍不具备基线和变更历史，不能算完整 FIM |
 | `2.2.0.2/scanner` | 分支头提交明确关闭 `proc_scan`、`fanotify`、`arf` 和进程全盘扫描 | 不能作为“功能全开”的默认版本 |
 | `2.2.2/ac_csc*`、`csc/0.9.x` | CSC/Agent Center 指标、插件退出指标和 Metrics SDK 变更；多个分支重复 | 需要数据 schema、后端消费者和版本依赖评估 |
-| `audit_log` | K8s audit 事件接收/转发改动 | 主线已含 K8s Audit 接收端，README 将其列为社区能力 |
+| `audit_log` | 新增 Manager `/api/v1/kubesec/*` 代理及 K8sSec 鉴权/配置；K8s Audit 接收端本身已在主线 | 代理依赖仓库外 KubeSec 服务；代码来自旧 Manager 路径，TLS 使用跳过证书校验，配置样例含静态凭据。不可直接拷入当前 `handler`/RBAC 主线；需先确认后端、重做安全配置并联调 |
 | [PR #741](https://github.com/bytedance/Elkeid/pull/741) | 弱口令规则、更新字典接口、Java 应用采集 | 已关闭且未合并；不是当前分支中的可发布功能 |
 | `v1.9` / PR #729 | 新内核 `file_ref` 适配所在版本线 | #729 的 base 是 `v1.9`；同类修复 #728 已合入上游 `main`，不要整条替换当前 driver |
 | RASP 分支（`rasp-engine`、`rasp-v2.2.0.3-*`、`stack-frame-block`） | JVM hook、规则引擎、类扫描和栈帧处理的不同迭代 | 依赖旧版本线；逐提交评估。开放 PR #634 是 native `.so` 路径改动 |
