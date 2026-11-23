@@ -8,7 +8,7 @@
 
 上游 `main` 基线为 `c906c512d20c0d56f2b779b8558ed69abae718c8`。本轮审计开始时目标 `main` 为 `e5873fe72fede48355cfb68e58b3627156f180b5`；该版本已有两项上游分支代码导入。下文按审计时可见的公开 refs、PR、README 和代码文件区分已进入目标仓库的代码与尚待评估的分支内容。
 
-本轮审计新增的提交只更新文档，没有新增上游源代码。以下两项分支代码在审计开始前已存在于目标仓库：
+以下两项上游分支代码导入在审计开始前已存在。之后目标仓库新增本地插件适配（v3.0 驱动的 RingSlot/SmithControl 接口、事件映射和控制任务处理），并记录了 Ubuntu 22.04 / kernel 5.15.0-203 构建与运行验证；本轮静态审查发现并修正 DNS IPv6 字段偏移，尚未重跑构建。
 
 | 已验证的导入提交 | 上游来源 | 当前文件核对 |
 |---|---|---|
@@ -21,13 +21,13 @@
 
 驱动中的 exe/argv allowlist 用于过滤一部分采集事件，不能当作“只允许白名单程序执行”的默认拒绝策略。当前实现已有执行阻断规则，但业务层还需补全可信软件身份、白名单策略管理、灰度/回滚、策略审计和离线更新。
 
-另有接口与构建集成风险：
+另有集成风险：
 
-- `plugins/driver/src/config.rs` 仍是 `KMOD_VERSION=1.7.0.6`、`/proc/elkeid-endpoint`、`/dev/hids_driver_allowlist`；新驱动 README 写 `/proc/hids_driver/1`、`/dev/hids_driver_whitelist`。
-- LKM `driver/LKM/include/trace.h` 与插件配置对 exe/argv allowlist add/delete 字符定义不一致，驱动 README 与两者也有不一致。需统一协议后才能依赖动态白名单下发。
-- 当前 driver build/release workflow 仍引用 `driver/build_script/*` 与 `driver/dockerfiles.*`，这些路径不在已导入的 `driver/` 子树中。
-
-这些静态接口差异尚需与新驱动的实际加载方式联调。当前没有构建/测试结果。
+- `plugins/driver` 已从 v1.7 文本管道适配到 v3.0 驱动的 RingSlot v1.9 ABI：事件走 `/sys/module/elkeid/parameters/control_trace`，控制由 `ringslot::SmithControl` 管理。内核模块版本是 `3.0.0.7`；RingSlot ABI 的 v1.9 标识不是模块版本。
+- 驱动 exe/argv allowlist 是采集过滤规则，不是默认拒绝型执行白名单。HIPS blocklist 才在匹配时阻断执行（`smith_exec_load` 返回 `-EACCES`）；另有 `protector.c` 的 `-EPERM` 自保护。
+- 插件本地处理 9001–9009 任务码；仓库内尚未确认 Manager/Console/Agent 的对应策略生产/下发链路，数据字典也需同步。
+- driver build/release workflow 仍引用 `driver/build_script/*` 与 `driver/dockerfiles.*`，这些路径不在已导入的 `driver/` 子树中；尚无与 v3.0 LKM 匹配的可重复发行流程。
+- 之前有 Ubuntu 22.04 / kernel 5.15.0-203 构建与运行记录。本轮 DNS IPv6 字段修正未重新构建；其他内核/架构和端到端策略流程仍未验证。
 
 ### Agent Center 2.2.3/ac
 
@@ -51,6 +51,7 @@ Hub 的“告警白名单”用于告警过滤。驱动 exe/argv allowlist 用�
 | `2.2.2/ac_csc*`、`csc/0.9.x` | CSC/Agent Center 指标、插件退出指标和 Metrics SDK 变更；多个分支重复 | 需要数据 schema、后端消费者和版本依赖评估 |
 | `audit_log` | 新增 Manager `/api/v1/kubesec/*` 代理及 K8sSec 鉴权/配置；K8s Audit 接收端本身已在主线 | 代理依赖仓库外 KubeSec 服务；代码来自旧 Manager 路径，TLS 使用跳过证书校验，配置样例含静态凭据。不可直接拷入当前 `handler`/RBAC 主线；需先确认后端、重做安全配置并联调 |
 | [PR #741](https://github.com/bytedance/Elkeid/pull/741) | 弱口令规则、更新字典接口、Java 应用采集 | 已关闭且未合并；不是当前分支中的可发布功能 |
+| `v1.9.1_agent` | 14 个 main 外提交、落后 main 781 个提交；改动涉及旧版 driver plugin 的 `kmod.rs`/transformer/utils 与若干 RASP 文件 | 不含当前 ringslot 主入口/服务端任务分发，不与 v3.0 adapter 同代；逐提交挑选，不整支合并 |
 | `v1.9` / PR #729 | 新内核 `file_ref` 适配所在版本线 | #729 的 base 是 `v1.9`；同类修复 #728 已合入上游 `main`，不要整条替换当前 driver |
 | RASP 分支（`rasp-engine`、`rasp-v2.2.0.3-*`、`stack-frame-block`） | JVM hook、规则引擎、类扫描和栈帧处理的不同迭代 | 依赖旧版本线；逐提交评估。开放 PR #634 是 native `.so` 路径改动 |
 | [PR #732](https://github.com/bytedance/Elkeid/pull/732) | Rust zip 依赖和 GitHub Actions 版本更新 | 开放中的构建维护，不是企业安全功能 |
@@ -67,7 +68,7 @@ README 另将蜜罐、主动防御、云查杀、防篡改标为规划项。功�
 
 ### 执行型程序白名单
 
-给现有执行阻断规则补充签名者/哈希/可信路径策略，支持策略 API、审计模式、默认拒绝模式、例外、灰度、回滚、离线策略和阻断审计。先统一驱动/Agent 的版本与控制接口。
+当前 exe/argv allowlist 只过滤部分采集事件，不能据此宣称“白名单程序放行/白名单外禁止运行”；HIPS blocklist 是单独的阻断能力。要实现企业级执行白名单，需新增可信身份（签名者/哈希/路径）策略、审核/默认拒绝模式、例外、灰度、回滚、离线策略、服务端下发与阻断审计。
 
 ### 完整 FIM
 
