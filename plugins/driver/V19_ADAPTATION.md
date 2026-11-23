@@ -38,10 +38,30 @@
 
 > 注意：v1.9 字段名与 v1.7 `schema.rs` 有差异（如 `exe`→`exe_path`、`sessionid`→`epoch`、`pns`→`mntns_id`、`root_pns`→`root_mntns_id`），需同步更新服务端数据字典。
 
-待实现：`src/event.rs`（文本切分 + schema 映射，见 `event.rs` 骨架）。
+已实现：`src/event.rs`（文本切分 + schema 映射）。
 
 ## 四、构建约束
 
 - `ringslot` crate 依赖 `driver/ring` + `driver/xfer`（C，build.rs 用 `cc` 编译）+ `libbpf-sys`
-- 只能在 **Linux**（Rust musl + 内核头 + libbpf）上编译；本机 Windows 无法验证
-- LKM 需在 Linux 上 `make` 单独编译（`driver/LKM`），模块名 `elkeid`
+- LKM 在 `driver/LKM` 用 `make` 编译，模块名 `elkeid`
+- 依赖：Rust + 内核头 + `pkg-config` + `libelf-dev` + `zlib1g-dev`（构建期）
+
+## 五、编译与运行时验证结果（Ubuntu 22.04 / 内核 5.15.0-203）
+
+| 组件 | 结果 |
+|---|---|
+| driver LKM（elkeid.ko，v3.0.0.7） | ✅ gcc 编译通过；insmod 成功，kprobe 钩子全部注册 |
+| ringslot 库（driver/rust） | ✅ cargo 编译通过（libbpf-sys vendored libbpf + 系统 libelf/zlib） |
+| driver 插件（plugins/driver，GNU） | ✅ cargo 编译通过（仅无害警告） |
+| 事件格式（运行时） | ✅ 首字段 = data_type；字段 `\0` 分隔；公共头字段顺序正确 |
+| 插件运行时依赖 | ✅ 仅 glibc（ldd 无 libelf/zlib，libbpf 已静态编入） |
+| musl 静态构建 | ⚠️ libbpf-sys 用 musl-gcc 编 libbpf 失败（缺 musl 版 UAPI 头 + libelf/zlib），需官方 Docker 构建镜像 |
+
+**结论**：GNU 构建的插件对 Ubuntu 22.04 离线部署已足够（仅依赖 glibc）；musl 静态仅在跨发行版/无 glibc 环境部署时才需要。
+
+## 六、剩余待办
+
+1. `src/event.rs` 中 execve 等事件的字段映射需按 `kprobe_print.h` 逐项核对（公共头已确认）。
+2. `kmod.rs` 中 `elkeid.ko` 下载 + `finit_module` 加载逻辑（离线场景可直接 insmod）。
+3. Cargo.toml 清理 7 个无用依赖（governor/nix/lru-cache/ttl_cache/twox-hash/users/walkdir）。
+4. 服务端数据字典字段名同步（`exe`→`exe_path`、`sessionid`→`epoch`、`pns`→`mntns_id` 等）。
