@@ -1,0 +1,63 @@
+baseline_id: 6000
+baseline_version: 1.0
+baseline_name: "社区 Linux 安全加固基线"
+baseline_name_en: "Community Linux Hardening Baseline"
+system:
+  - "centos"
+  - "ubuntu"
+  - "debian"
+check_list:
+  -
+    check_id: 1
+    type: "Identification"
+    title: "Disable SSH root login"
+    title_cn: "SSH 禁止 root 登录"
+    description: "Disable SSH root login to reduce attack surface"
+    description_cn: "禁止 root 直接 SSH 登录，降低攻击面"
+    solution: "Set PermitRootLogin no in /etc/ssh/sshd_config"
+    solution_cn: "在 /etc/ssh/sshd_config 中设置 PermitRootLogin no"
+    security: "high"
+    type_cn: "安全加固"
+    check:
+      rules:
+        - type: "file_line_check"
+          param:
+            - "/etc/ssh/sshd_config"
+          filter: 'PermitRootLogin\s+(\w+)'
+          result: '$(==)no'
+  -
+    check_id: 2
+    type: "Identification"
+    title: "Disable SSH empty password"
+    title_cn: "SSH 禁用空密码"
+    description: "Disable SSH empty password authentication"
+    description_cn: "禁用 SSH 空密码登录"
+    solution: "Set PermitEmptyPasswords no in /etc/ssh/sshd_config"
+    solution_cn: "在 /etc/ssh/sshd_config 中设置 PermitEmptyPasswords no"
+    security: "high"
+    type_cn: "安全加固"
+    check:
+      rules:
+        - type: "file_line_check"
+          param:
+            - "/etc/ssh/sshd_config"
+          filter: 'PermitEmptyPasswords\s+(\w+)'
+          result: '$(==)no'
+  -
+    check_id: 3
+    type: "Identification"
+    title: "Enable TCP SYN cookies"
+    title_cn: "开启 SYN Cookie"
+    description: "Enable TCP SYN cookies to mitigate SYN flood attacks"
+    description_cn: "开启 TCP SYN Cookie 防护，缓解 SYN 洪水攻击"
+    solution: "Set net.ipv4.tcp_syncookies = 1 in /etc/sysctl.conf"
+    solution_cn: "在 /etc/sysctl.conf 中设置 net.ipv4.tcp_syncookies = 1"
+    security: "medium"
+    type_cn: "安全加固"
+    check:
+      rules:
+        - type: "file_line_check"
+          param:
+            - "/etc/sysctl.conf"
+          filter: 'net\.ipv4\.tcp_syncookies\s*=\s*(\d+)'
+          result: '$(==)1'
