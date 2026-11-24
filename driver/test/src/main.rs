@@ -65,6 +65,15 @@ fn process_kmod(module: Option<&str>) {
         println!("{}", e);
     }
 
+    let bl_exe_json = "exe_block.json";
+    if let Err(e) = controler.ac_set_block_exe_argv(bl_exe_json) {
+        println!("set block exe error: {}", e);
+    }
+
+    if let Err(e) = controler.ac_add_allow_exe("/usr/bin/ls") {
+        println!("add allow exe error: {}", e);
+    }
+
     if let Err(e) = controler.psad_enable() {
         println!("{}", e);
     }
