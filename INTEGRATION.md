@@ -6,7 +6,7 @@
 
 目标仓库从上游 `main` 基线派生。审计开始时目标 `main` 为 `e5873fe`；下表列出已确认的上游分支代码导入。全分支账本记录尚未导入的公开分支功能和待评估项。
 
-本轮提交仅更新审计文档，没有新增合并上游源代码；下表两项代码导入在审计开始前已存在于目标仓库。
+下表两项上游分支代码导入在审计开始前已存在。之后，目标仓库在 `plugins/driver/` 完成了基于 v3.0 RingSlot/SmithControl 接口的本地适配（事件读取、白名单/阻断控制和事件字段映射）；该适配不是上游某个完整企业版分支的整支合并。Ubuntu 22.04 / kernel 5.15.0-203 曾有构建与运行验证记录；本轮另按内核事件定义静态核对并修正 DNS IPv6 字段映射，尚未重跑构建。
 
 | 已验证的导入提交 | 来源 | 导入内容 |
 |---|---|---|
@@ -27,11 +27,17 @@
 - 动态连接限流、配置指纹热更新、增强防护等级字段、ZSTD 传输、批量心跳和指标字段更新。
 - 该导入只替换 `server/agent_center/`，需要与目标 Agent、Console、HUB 的协议和配置共同联调。
 
+### 插件本地适配：目标仓库实现
+
+- `plugins/driver` 通过 `ringslot::RingSlot` / `SmithControl` 使用 v3.0 驱动的 RingSlot v1.9 ABI，包含 HIPS 阻断、自保护和 PSAD 控制。
+- 插件里 9001–9009 是本地控制任务码；本轮未检出 Manager/Console/Agent 端对应的策略下发映射，需补齐并联调。
+- exe/argv 驱动 allowlist 过滤采集事件，不能作为“白名单之外拒绝运行”的执行白名单。HIPS 阻断规则是另一套能力。
+
 ## 集成风险与立即待办
 
-1. **Agent 与新驱动接口需对齐。** `plugins/driver/src/config.rs` 仍声明 `KMOD_VERSION=1.7.0.6`、`/proc/elkeid-endpoint`、`/dev/hids_driver_allowlist`；新驱动 README 写 `/proc/hids_driver/1` 和 `/dev/hids_driver_whitelist`。LKM 的 `trace.h` 与 Rust 插件对 add/delete 白名单命令的字符定义也不一致。应先统一模块版本、事件 pipe、控制节点和指令码。
-2. **驱动 CI 仍指向旧目录。** `.github/workflows/Elkeid_driver_build.yml` 和 release workflow 引用 `driver/build_script/*`、`driver/dockerfiles.*`；当前导入的 `driver/` 子树没有这些路径。需要将 build/release workflow 改到 v3.0 驱动构建方式后再发版。
-3. **尚未做 Linux 构建和运行联调。** 需要验证 x86_64/aarch64、支持内核、驱动安装/卸载、Agent 数据通路、事件丢失和策略更新。当前仓库记录的是代码导入，不代表已验证可部署。
+1. **服务端策略下发仍待接通。** 插件处理 9001–9009 任务码，但未确认 Manager/Console/Agent 有对应生成、授权、审计及字段字典；不能把插件侧 handler 当成端到端功能已交付。
+2. **驱动装载与发布流程需补齐。** 插件只连接已加载的 `elkeid` 模块；现有 build/release workflow 仍引用 `driver/build_script/*`、`driver/dockerfiles.*`，这些路径不在已导入的 `driver/` 子树中。需提供与当前 LKM 匹配的构建、签名、发布和安装流程。
+3. **验证范围有限。** 仓库记录了 Ubuntu 22.04 / kernel 5.15.0-203 的构建与运行验证；本轮静态修正尚未重跑，其他发行版/内核/架构及策略端到端流程未验证。
 
 ## 默认已有能力
 

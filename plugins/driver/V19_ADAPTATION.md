@@ -12,7 +12,7 @@
 | 自保护 | ❌ 无 | `self_protection_enable/disable()`（protector_switch） |
 | 端口扫描 PSAD | 仅模块参数 | `psad_enable()` + `psad_add_allowlist_ipv4/6()` + `psad_set_flag()` |
 | eBPF | ❌ 无 | `EBPFConsumer/EBPFLoader/EBPFControl`（AL_EBPF_EXE/ARGV） |
-| **事件格式** | **文本**：记录间 `\x17`，字段间 `\x1e`，前缀 data_type | **二进制**：`sd_event`（`e_head.eid`/`e_head.size` + packed 字段 + `p_data` 字符串区），见 `driver/xfer/xfer.h` |
+| **事件格式** | v1.7 文本记录使用 `\x17` / `\x1e` 分隔 | 内核 ring 内部是二进制 `sd_event`；C 层 `sd_unpack` 后，Rust `RingSlot::read_record()` 收到 NUL 分隔文本 |
 
 ## 二、已完成 / 可交付部分（I/O + 控制层）
 
@@ -61,7 +61,9 @@
 
 ## 六、剩余待办
 
-1. `src/event.rs` 中 execve 等事件的字段映射需按 `kprobe_print.h` 逐项核对（公共头已确认）。
-2. `kmod.rs` 中 `elkeid.ko` 下载 + `finit_module` 加载逻辑（离线场景可直接 insmod）。
-3. Cargo.toml 清理 7 个无用依赖（governor/nix/lru-cache/ttl_cache/twox-hash/users/walkdir）。
-4. 服务端数据字典字段名同步（`exe`→`exe_path`、`sessionid`→`epoch`、`pns`→`mntns_id` 等）。
+1. 已将当前 LKM 的 51 个 `SD_XFER_DEFINE` schema block 与 Rust 字段表静态对照；本轮修正了 DNS IPv6（data_type 601）缺少 dip/sip 时的字段偏移。该修正尚未重新编译或回放事件，仍需覆盖所有事件 ID、缺失字段和实际后端字段字典。
+2. `Record.timestamp` 以插件接收时间（Unix 秒）填写，不是内核事件发生时间；若需精确排序，应由内核事件格式提供时间戳并联调。
+3. 插件处理 9001–9009 本地任务码；需补齐 Manager/Console/Agent 的策略生成、鉴权、下发与审计链路。
+4. `Kmod` 只连接已加载模块；需提供与 v3.0.0.7 LKM 匹配的构建、签名、发布和安装流程。当前 driver workflow 引用的旧构建目录不在导入子树中。
+5. 目前有 Ubuntu 22.04 / kernel 5.15.0-203 的单点验证记录；仍需做发行版、内核、x86_64/aarch64 矩阵验证。
+6. musl 静态构建（跨发行版部署需要）。

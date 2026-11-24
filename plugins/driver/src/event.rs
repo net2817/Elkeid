@@ -4,13 +4,15 @@
 //! （`driver/ring/kmod.c` 的 `tb_read_kmod_v1_9` → `sd_unpack(..., sd_query_event_v1_9)`），
 //! `RingSlot::read_record()` 返回的是 **\0 分隔的文本字段**，本模块只做「切分 + 按 schema 映射」。
 //!
-//! ⚠️ 需在 Linux 上用 `driver/test` 二进制观察实际输出后，确认：
-//!    1) 第一个字段是 data_type(xid) 还是 timestamp；
-//!    2) 是否带 SD_REC_ENDIAN(0xFFFE00) 记录尾；
-//!    再据此微调 `parse_record` 的字段索引。
+//! 字段顺序按当前 `kprobe_print.h` 和 `anti_rootkit_print.h` 静态核对。
+ //! 运行时样本在 Ubuntu 22.04 / kernel 5.15.0-203 上验证过 xid 首字段和 NUL 分隔；
+ //! timestamp 由插件接收时补充，因此它代表采集时间，不是精确内核事件时间。
 
 use plugins::{Payload, Record};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// 公共头字段顺序（ENTRY_COMMON，见 kprobe_print.h），不含 xid。
 /// 注：v1.9 字段名与 v1.7 schema.rs 有差异，见 V19_ADAPTATION.md。
@@ -21,7 +23,7 @@ pub const COMMON_FIELDS: &[&str] = &[
 
 /// 事件私有字段（按 data_type）。此处列出核心事件；完整表需按 kprobe_print.h /
 /// anti_rootkit_print.h 的 XFER(...) 顺序补齐（含 execve/connect/dns 的 v4/v6/nosocket 变体）。
-fn event_fields(data_type: u32) -> &'static [&'static str] {
+fn event_fields(data_type: u32, private_field_count: usize) -> &'static [&'static str] {
     match data_type {
         1 => &["file", "buf"],                             // write
         2 => &["flags", "mode", "filename"],              // open
@@ -48,7 +50,8 @@ fn event_fields(data_type: u32) -> &'static [&'static str] {
         201 => &["kiltgid", "killtid", "killsig", "killret"], // tgkill
         231 => &[],                                       // exit_group
         356 => &["fdname", "flags"],                      // memfd_create
-        601 => &["query", "sa_family", "dip", "dport", "sip", "sport", "opcode", "rcode", "type", "pid_tree"], // dns
+        601 if private_field_count == 8 => &["query", "sa_family", "dport", "sport", "opcode", "rcode", "type", "pid_tree"], // dns6
+        601 => &["query", "sa_family", "dip", "dport", "sip", "sport", "opcode", "rcode", "type", "pid_tree"], // dns4
         602 => &["pathstr", "dip", "dport", "sip", "sport", "sa_family", "socket_pid", "s_id", "pid_tree"],    // create
         603 => &["mod_name", "pid_tree", "pwd"],          // init_module
         604 => &["pid_tree", "old_uid", "retval"],        // update_cred
@@ -93,15 +96,19 @@ pub fn parse_record(rec: &[u8]) -> Option<Record> {
 
     let mut map: HashMap<String, String> = HashMap::new();
     let mut idx = 0;
-    if has_common_header(data_type) {
+    let common_field_count = if has_common_header(data_type) {
         for name in COMMON_FIELDS {
             if idx < rest.len() {
                 map.insert((*name).to_string(), String::from_utf8_lossy(rest[idx]).into_owned());
             }
             idx += 1;
         }
-    }
-    for name in event_fields(data_type) {
+        COMMON_FIELDS.len()
+    } else {
+        0
+    };
+    let private_field_count = rest.len().saturating_sub(common_field_count);
+    for name in event_fields(data_type, private_field_count) {
         if idx < rest.len() {
             map.insert((*name).to_string(), String::from_utf8_lossy(rest[idx]).into_owned());
         }
@@ -112,8 +119,11 @@ pub fn parse_record(rec: &[u8]) -> Option<Record> {
     pld.set_fields(map);
     let mut r = Record::new();
     r.set_data_type(data_type as i32);
-    // timestamp 由 agent 侧补充；此处先置 0，待 linux-verify 后确认是否从记录中解析
-    r.set_timestamp(0);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    r.set_timestamp(timestamp);
     r.set_data(pld);
     Some(r)
 }

@@ -3,8 +3,8 @@ use lazy_static::lazy_static;
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::IpRange;
 
-// v1.9 driver（模块名由 hids_driver 更名为 elkeid）
-pub const KMOD_VERSION: &str = "1.9.1";
+// Kernel module release version from driver/LKM/include/kprobe.h. RingSlot ABI is v1.9.
+pub const KMOD_VERSION: &str = "3.0.0.7";
 pub const KMOD_NAME: &str = "elkeid";
 
 // v1.9 控制接口：sysfs 参数文件（取代 /proc/elkeid-endpoint 与 /dev/hids_driver_allowlist）
