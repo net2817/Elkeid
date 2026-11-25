@@ -13,6 +13,7 @@ contrib/elkeid-hardening/
 ├── fim/            fanotify FIM 采集与基线比对原型（C + Python）
 ├── baseline/       社区 Linux 加固基线 YAML（6000.yaml）
 ├── hooks/          驱动执行白名单控制与文件读写钩子启用脚本
+├── runbooks/       运维排障手册（HUB 告警误报风暴排查与修复脚本）
 └── diagnostics/    HUB / Kafka / Agent 诊断脚本
 ```
 
